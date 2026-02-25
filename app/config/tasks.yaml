@@ -1,0 +1,28 @@
+diagonistic_task:
+  description: >
+    Create 3-5 senario based questions about {topic}  to assess the learner
+  expected_output: >
+    A senario based questions related to {topic}
+
+level_classifing_task:
+  description:
+    classify the level of the learners based on the pre-assessment
+  expected_output: >
+    disclose the level of the learner
+learning_path_planner_task:
+  description: >
+    Create personalized learning path based on the learners level
+  expected_output: >
+    personalized plan
+
+senario_generation_task:
+  description: >
+    Create senario based study materials on {topic} for {USER_LEVEL} level learners and cover all {competency}
+  expected_output: >
+    senario based study material for {topic} and Include all of them {competency}
+
+ai_tutor_task: 
+  description: >
+    Teach {topic} to the learner in friendly and interactive way and cover {competency}, the level of the learner is {USER_LEVEL}.
+  expected_output: >
+    Tech learners

@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pydantic
+openai
+anthropic
+langsmith
+python-dotenv
+dotenv
+crewai

@@ -39,6 +39,10 @@ class AssessmentSubmitRequest(BaseModel):
     answer: str
 
 
+class PreAssessmentQuestionsRequest(BaseModel):
+    topic: str
+    competencies: List[str]
+
 # ── Guards ────────────────────────────────────────────────────────────────
 
 def _get_or_404(session_id: str):
@@ -80,6 +84,20 @@ def start_session(req: StartSessionRequest):
         ),
     }
 
+
+@app.post("/pre-assessment/questions", summary="Create session and get the first pre-assessment question")
+async def pre_assessment_questions(req: PreAssessmentQuestionsRequest):
+    """
+    Convenience endpoint: creates a session *and* immediately returns the first
+    scenario-based pre-assessment question. Use the returned session_id for
+    follow-up answers via POST /pre-assessment/chat.
+    """
+    if not req.competencies:
+        raise HTTPException(status_code=400, detail="At least one competency is required.")
+
+    session = create_session(topic=req.topic, competencies=req.competencies)
+    first_question = await handle_pre_assessment_start(session)
+    return first_question
 
 @app.post("/pre-assessment/start", summary="Generate the first pre-assessment question")
 async def pre_assessment_start(req: StartPreAssessmentRequest):

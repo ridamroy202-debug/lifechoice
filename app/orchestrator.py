@@ -35,6 +35,7 @@ async def _setup_competency(session: LearnerSession):
         material = StudyMeterial().crew().kickoff(inputs={
             'topic': session.topic,
             'competency': comp,
+            'USER_LEVEL': session.user_level,
             'user_level': session.user_level,
         })
         session.study_materials[comp] = material.raw
@@ -43,6 +44,7 @@ async def _setup_competency(session: LearnerSession):
         plan = PathPlnner().crew().kickoff(inputs={
             'topic': session.topic,
             'competency': comp,
+            'USER_LEVEL': session.user_level,
             'user_level': session.user_level,
             'weak_areas': ', '.join(session.weak_areas),
         })
@@ -160,7 +162,8 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
     result = TutorCrew().crew().kickoff(inputs={
         'topic': session.topic,
         'competency': comp,
-        'user_level': session.user_level,
+        'USER_LEVEL': session.user_level,   # match template variable casing
+        'user_level': session.user_level,   # backward compatibility
         'weak_areas': ', '.join(session.weak_areas),
         'chat_history': session.format_recent_history(),
         'user_message': user_message,

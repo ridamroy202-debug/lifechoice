@@ -21,7 +21,7 @@ class PreeAssesmentResponse(BaseModel):
 class LearningChatRequest(BaseModel):
     competency : str
     user_level : UserLevel
-    messages : List(ChatMessage)
+    messages : List[ChatMessage]
     interaction_count : int = 0
 
 class LearningChatResponse(BaseModel):

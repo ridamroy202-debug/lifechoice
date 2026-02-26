@@ -1,28 +1,115 @@
 diagonistic_task:
   description: >
-    Create 3-5 senario based questions about {topic}  to assess the learner
+    Topic: {topic}. This is pre-assessment turn {turn_number}.
+    Conversation so far:
+    {chat_history}
+
+    Learner just said: "{user_message}"
+
+    If this is turn 1, introduce yourself briefly and present the first of 4 progressive
+    scenario-based questions (beginner to advanced level). If turn > 1, acknowledge the
+    learner's answer briefly, then ask the next question. Never repeat a question.
+    Keep responses under 200 words.
   expected_output: >
-    A senario based questions related to {topic}
+    A single short response under 200 words that either presents the next scenario-based
+    question or wraps up the assessment if all questions are answered.
 
 level_classifing_task:
-  description:
-    classify the level of the learners based on the pre-assessment
+  description: >
+    Based on this pre-assessment conversation for topic '{topic}':
+    {chat_history}
+
+    Classify the learner's level as exactly one of: beginner, intermediate, advanced.
+    Identify 1-3 specific weak areas based on their answers.
+    Respond ONLY with valid JSON. No extra text.
   expected_output: >
-    disclose the level of the learner
+    A valid JSON object with exactly two keys: "level" (string: beginner/intermediate/advanced)
+    and "weak_areas" (list of strings).
+    Example: {"level": "beginner", "weak_areas": ["prompt structure", "output control"]}
+
 learning_path_planner_task:
   description: >
-    Create personalized learning path based on the learners level
+    Create a compact 9-turn learning arc for:
+    - Topic: {topic}
+    - Competencies to cover: {competency}
+    - Learner level: {user_level}
+    - Weak areas to focus on: {weak_areas}
+
+    Plan exactly 9 turns. Each turn must be scenario-based (no theory dumps).
+    Output as a numbered list. Keep each turn description under 60 words.
   expected_output: >
-    personalized plan
+    A numbered list of exactly 9 turns. Each item has a "Scenario:" and a "Question:" field.
 
 senario_generation_task:
   description: >
-    Create senario based study materials on {topic} for {USER_LEVEL} level learners and cover all {competency}
-  expected_output: >
-    senario based study material for {topic} and Include all of them {competency}
+    Generate study material for:
+    - Topic: {topic}
+    - Competencies: {competency}
+    - Learner level: {user_level}
 
-ai_tutor_task: 
-  description: >
-    Teach {topic} to the learner in friendly and interactive way and cover {competency}, the level of the learner is {USER_LEVEL}.
+    Create 3 real-world applied scenarios. No theory dumps. Each scenario 150-250 words.
+    End each scenario with one clear challenge question for the learner.
   expected_output: >
-    Tech learners
+    3 numbered real-world scenarios, each ending with a challenge question.
+
+ai_tutor_task:
+  description: >
+    You are the AI Tutor. Here is the current session context:
+    - Topic: {topic}
+    - Competency: {competency}
+    - Learner level: {user_level}
+    - Weak areas: {weak_areas}
+    - Learning turn: {turn_number} of {max_turns}
+
+    Conversation history:
+    {chat_history}
+
+    Learner just said: "{user_message}"
+
+    Study material for this session:
+    {study_material}
+
+    Respond as a Socratic tutor. Give brief feedback on the learner's answer, then present
+    the next scenario or deepen the question. Never give the answer directly.
+    If turn_number >= 8, begin wrapping up and mention that the assessment is coming next.
+    Keep your response under 250 words. End with one clear question or task.
+  expected_output: >
+    A single tutor response under 250 words, ending with exactly one question or task for
+    the learner.
+
+final_assessment_task:
+  description: >
+    This is the FINAL assessment for the micro-credential on '{topic}'.
+    The learner has completed ALL of the following competencies: {all_competencies}.
+
+    The learner's overall response: {user_response}
+
+    Evaluate holistically across all competencies using this rubric:
+    {rubric_json}
+
+    Consider: Does the learner demonstrate integrated understanding across all competencies?
+    Score 0-100 overall. Pass threshold is 70%.
+    Respond ONLY with valid JSON. No extra text.
+  expected_output: >
+    A valid JSON object with keys: "criteria_scores" (list), "overall_percent" (float),
+    "pass" (bool), "summary" (string). Same format as competency assessment.
+
+assessment_eval_task:
+  description: >
+    Evaluate this learner response against the rubric below.
+
+    Competency being assessed: {competency}
+    Scenario presented to learner: {scenario}
+    Learner's response: {user_response}
+
+    Rubric criteria:
+    {rubric_json}
+
+    Score each criterion from 0-100. Be fair but rigorous.
+    A score >= 70 overall means the learner passes.
+    Respond ONLY with valid JSON. No extra text.
+  expected_output: >
+    A valid JSON object with keys: "criteria_scores" (list of objects with criterion, score,
+    feedback), "overall_percent" (float), "pass" (bool), "summary" (string, 1-2 sentences).
+    Example: {"criteria_scores": [{"criterion": "Accuracy", "score": 75, "feedback": "Good"}],
+    "overall_percent": 75.0, "pass": true, "summary": "Strong understanding demonstrated."}

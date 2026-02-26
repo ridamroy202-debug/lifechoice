@@ -1,0 +1,23 @@
+default:
+  criteria:
+    - name: Accuracy
+      description: Is the answer factually correct for the competency?
+      weight: 0.40
+    - name: Depth
+      description: Does the answer show deep understanding, not surface recall?
+      weight: 0.35
+    - name: Application
+      description: Does the learner apply the concept to the given scenario?
+      weight: 0.25
+
+prompt_engineering:
+  criteria:
+    - name: Prompt Structure
+      description: Is the prompt well-structured with clear intent and constraints?
+      weight: 0.35
+    - name: Output Control
+      description: Does the learner show ability to control tone/format/length?
+      weight: 0.30
+    - name: Iteration Awareness
+      description: Does the learner demonstrate understanding of iterative refinement?
+      weight: 0.35

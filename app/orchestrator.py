@@ -1,4 +1,5 @@
 import json
+import re
 from app.state import LearnerSession, CompetencyResult
 from app.session_manager import get_session, save_session
 from app.crews.pre_assessment_crew import PreAssessCrew
@@ -28,6 +29,31 @@ def _load_rubric(competency: str) -> dict:
     return RUBRICS.get(competency.lower().replace(' ', '_'), RUBRICS['default'])
 
 
+def _extract_subparts_from_plan(plan_text: str, fallback_turns: int = 9) -> list[str]:
+    """Parse planner output into sequential sub-parts."""
+    if not plan_text or not plan_text.strip():
+        return [f"Part {i}: Applied practice task." for i in range(1, fallback_turns + 1)]
+
+    text = plan_text.strip()
+    chunks = re.split(r"\n(?=\s*(?:\d+[\).\:-]|[-*])\s+)", text)
+    parts = [c.strip() for c in chunks if c.strip()]
+    cleaned: list[str] = []
+
+    if len(parts) <= 1:
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        parts = [ln for ln in lines if re.match(r"^(?:\d+[\).\:-]|[-*])\s+", ln)] or lines
+
+    for part in parts:
+        item = re.sub(r"^\s*(?:\d+[\).\:-]|[-*])\s+", "", part).strip()
+        if item:
+            cleaned.append(item)
+
+    if not cleaned:
+        cleaned = [f"Part {i}: Applied practice task." for i in range(1, fallback_turns + 1)]
+
+    return cleaned[:fallback_turns]
+
+
 async def _setup_competency(session: LearnerSession):
     """Generate study material + learning plan for current competency (if not cached)."""
     comp = session.current_competency
@@ -49,6 +75,12 @@ async def _setup_competency(session: LearnerSession):
             'weak_areas': ', '.join(session.weak_areas),
         })
         session.learning_plans[comp] = plan.raw
+
+    if comp not in session.competency_subparts:
+        session.competency_subparts[comp] = _extract_subparts_from_plan(
+            session.learning_plans.get(comp, ''),
+            fallback_turns=session.max_learning_turns,
+        )
 
 
 # ── Phase Handlers ────────────────────────────────────────────────────────
@@ -140,6 +172,9 @@ async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> di
         response['level'] = session.user_level
         response['weak_areas'] = session.weak_areas
         response['next_competency'] = session.current_competency
+        response['current_subpart_index'] = session.current_subpart_index + 1
+        response['current_subpart'] = session.current_subpart
+        response['total_subparts'] = len(session.competency_subparts.get(session.current_competency, []))
         response['message'] = (
             f"Great work on the pre-assessment! Your level has been set to "
             f"**{session.user_level}**. We'll now begin learning: "
@@ -153,12 +188,24 @@ async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> di
 async def handle_learning(session: LearnerSession, user_message: str) -> dict:
     """
     Handles one interactive learning turn for the current competency.
-    After max_learning_turns, signals the learner is ready for competency assessment.
+    Sub-parts are delivered sequentially; learner may ask clarifying questions at any time.
     """
     session.learning_turn += 1
     session.add_message('user', user_message)
 
     comp = session.current_competency
+    subparts = session.competency_subparts.get(comp, [])
+    total_subparts = len(subparts)
+    current_subpart = session.current_subpart
+
+    msg = user_message.lower().strip()
+    advance_signals = ['next', 'continue', 'move on', 'go ahead', 'done', 'got it', 'understood']
+    should_advance_subpart = any(signal in msg for signal in advance_signals)
+
+    if should_advance_subpart and total_subparts > 0 and session.current_subpart_index < (total_subparts - 1):
+        session.current_subpart_index += 1
+        current_subpart = session.current_subpart
+
     result = TutorCrew().crew().kickoff(inputs={
         'topic': session.topic,
         'competency': comp,
@@ -169,12 +216,19 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
         'user_message': user_message,
         'turn_number': session.learning_turn,
         'max_turns': session.max_learning_turns,
+        'current_subpart': current_subpart,
+        'subpart_index': session.current_subpart_index + 1,
+        'total_subparts': total_subparts,
         'study_material': session.study_materials.get(comp, ''),
     })
     ai_response = result.raw
     session.add_message('assistant', ai_response)
 
-    ready_for_assessment = session.learning_turn >= session.max_learning_turns
+    completed_all_subparts = total_subparts == 0 or session.current_subpart_index >= (total_subparts - 1)
+    ready_for_assessment = (
+        session.learning_turn >= session.max_learning_turns
+        and completed_all_subparts
+    )
     if ready_for_assessment:
         session.phase = 'competency_assessment'
 
@@ -185,6 +239,9 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
         'competency': comp,
         'turn': session.learning_turn,
         'max_turns': session.max_learning_turns,
+        'current_subpart_index': session.current_subpart_index + 1,
+        'total_subparts': total_subparts,
+        'current_subpart': current_subpart,
         'message': ai_response,
         'ready_for_assessment': ready_for_assessment,
     }

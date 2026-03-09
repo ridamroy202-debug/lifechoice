@@ -60,6 +60,8 @@ ai_tutor_task:
     - Learner level: {user_level}
     - Weak areas: {weak_areas}
     - Learning turn: {turn_number} of {max_turns}
+    - Current sub-part: {subpart_index} of {total_subparts}
+    - Current sub-part detail: {current_subpart}
 
     Conversation history:
     {chat_history}
@@ -69,8 +71,11 @@ ai_tutor_task:
     Study material for this session:
     {study_material}
 
-    Respond as a Socratic tutor. Give brief feedback on the learner's answer, then present
-    the next scenario or deepen the question. Never give the answer directly.
+    Respond as a Socratic tutor. Give brief feedback on the learner's answer.
+    If learner asks for clarification, explain the same sub-part in a simpler way and ask
+    one focused follow-up question. Do not jump ahead automatically.
+    If learner says they are ready to move on, continue to the next sub-part.
+    Never give the answer directly.
     If turn_number >= 8, begin wrapping up and mention that the assessment is coming next.
     Keep your response under 250 words. End with one clear question or task.
   expected_output: >

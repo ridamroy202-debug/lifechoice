@@ -130,9 +130,11 @@ async def pre_assessment_chat(req: PreAssessmentChatRequest):
 async def learn_chat(req: LearnChatRequest):
     """
     Send a message to the AI Tutor for the current competency.
-    The tutor responds with Socratic feedback + next scenario.
-    After 9 turns, `ready_for_assessment: true` signals you should call
-    POST /assessment/competency next.
+    The tutor responds with Socratic feedback and teaches sub-parts sequentially.
+    Learner can ask clarification questions at any time; they remain on the same sub-part
+    until they indicate they are ready to continue.
+    Once minimum turns are complete and all sub-parts are covered,
+    `ready_for_assessment: true` signals you should call POST /assessment/competency next.
     """
     session = _get_or_404(req.session_id)
     _require_phase(session, 'learning')
@@ -181,6 +183,9 @@ def get_session_status(session_id: str):
         "weak_areas": session.weak_areas,
         "current_competency": session.current_competency,
         "competency_index": session.current_competency_index,
+        "current_subpart_index": session.current_subpart_index + 1,
+        "current_subpart": session.current_subpart,
+        "total_subparts": len(session.competency_subparts.get(session.current_competency, [])),
         "total_competencies": len(session.competencies),
         "pre_assessment_turn": session.pre_assessment_turn,
         "learning_turn": session.learning_turn,

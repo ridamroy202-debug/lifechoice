@@ -54,6 +54,24 @@ def _extract_subparts_from_plan(plan_text: str, fallback_turns: int = 9) -> list
     return cleaned[:fallback_turns]
 
 
+def _is_technical_competency(name: str) -> bool:
+    tokens = (
+        "regression",
+        "statistics",
+        "probability",
+        "python",
+        "sql",
+        "analysis",
+        "machine learning",
+        "model",
+        "algorithm",
+        "data",
+        "math",
+    )
+    lowered = name.lower()
+    return any(tok in lowered for tok in tokens)
+
+
 async def _setup_competency(session: LearnerSession):
     """Generate study material + learning plan for current competency (if not cached)."""
     comp = session.current_competency
@@ -206,6 +224,16 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
         session.current_subpart_index += 1
         current_subpart = session.current_subpart
 
+    cleaned_subpart = re.sub(r"\*\*", "", current_subpart or "").strip()
+    subpart_scenario = cleaned_subpart
+    subpart_question = ""
+    if "Question:" in cleaned_subpart:
+        parts = cleaned_subpart.split("Question:", 1)
+        subpart_scenario = parts[0].replace("Scenario:", "").strip()
+        subpart_question = parts[1].strip()
+
+    competency_is_technical = _is_technical_competency(comp)
+
     result = TutorCrew().crew().kickoff(inputs={
         'topic': session.topic,
         'competency': comp,
@@ -217,6 +245,10 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
         'turn_number': session.learning_turn,
         'max_turns': session.max_learning_turns,
         'current_subpart': current_subpart,
+        'subpart_scenario': subpart_scenario,
+        'subpart_question': subpart_question,
+        'competency_is_technical': 'yes' if competency_is_technical else 'no',
+        'response_depth': 'high' if competency_is_technical else 'medium',
         'subpart_index': session.current_subpart_index + 1,
         'total_subparts': total_subparts,
         'study_material': session.study_materials.get(comp, ''),

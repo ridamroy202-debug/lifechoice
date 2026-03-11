@@ -62,6 +62,10 @@ ai_tutor_task:
     - Learning turn: {turn_number} of {max_turns}
     - Current sub-part: {subpart_index} of {total_subparts}
     - Current sub-part detail: {current_subpart}
+    - Scenario focus for this sub-part: {subpart_scenario}
+    - Intended learner task for this sub-part: {subpart_question}
+    - Technical competency mode: {competency_is_technical}
+    - Response depth target: {response_depth}
 
     Conversation history:
     {chat_history}
@@ -71,16 +75,30 @@ ai_tutor_task:
     Study material for this session:
     {study_material}
 
-    Respond as a Socratic tutor. Give brief feedback on the learner's answer.
-    If learner asks for clarification, explain the same sub-part in a simpler way and ask
-    one focused follow-up question. Do not jump ahead automatically.
+    Teach the competency directly in a beginner-friendly but technically accurate way.
+    Use this response structure every turn:
+    1) Concept Teaching: explain the current sub-part in clear, practical language.
+    2) Technical Breakdown: include math/logic when relevant (formula, assumptions, constraints).
+    3) Mini Worked Example: apply to the scenario focus with concrete numbers when possible.
+    4) Learner Action: one specific task for the learner to perform now.
+
+    If Technical competency mode is "yes", include all of these:
+    - one simple formula in plain text,
+    - one small markdown table (at least 3 rows),
+    - one short step flow (4-6 ordered steps).
+
+    If learner asks for clarification, simplify the same sub-part and keep them on it.
     If learner says they are ready to move on, continue to the next sub-part.
-    Never give the answer directly.
+    Never give the final full solution, but do provide practical guidance.
+    Avoid generic prompts like "why do you think...?" unless tied to a concrete applied step.
     If turn_number >= 8, begin wrapping up and mention that the assessment is coming next.
-    Keep your response under 250 words. End with one clear question or task.
+    Length target:
+    - Technical mode yes: 320-520 words.
+    - Technical mode no: 220-320 words.
+    End with one clear question or task.
   expected_output: >
-    A single tutor response under 250 words, ending with exactly one question or task for
-    the learner.
+    A descriptive tutor response with Concept Teaching, Technical Breakdown,
+    Mini Worked Example, and one concrete Learner Action task.
 
 final_assessment_task:
   description: >

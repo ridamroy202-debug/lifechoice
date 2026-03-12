@@ -16,6 +16,27 @@ class CompetencyResult(BaseModel):
     feedback: str = ""
 
 
+# ── Chat Stage Mapping ───────────────────────────────────────────────────────
+# Maps chat turn numbers (1-22) to learning stages and Bloom's levels
+STAGE_MAP = {
+    'introduction':  {'turns': (1, 2),   'bloom': 'Remember'},
+    'core_concepts': {'turns': (3, 6),   'bloom': 'Understand'},
+    'examples':      {'turns': (7, 10),  'bloom': 'Apply/Analyze'},
+    'practice':      {'turns': (11, 14), 'bloom': 'Apply/Evaluate'},
+    'doubt_solving': {'turns': (15, 22), 'bloom': 'Evaluate/Create'},
+}
+
+
+def _get_stage_info(turn: int) -> tuple[str, str]:
+    """Return (stage_name, bloom_level) for a given learning turn number."""
+    for stage_name, info in STAGE_MAP.items():
+        low, high = info['turns']
+        if low <= turn <= high:
+            return stage_name, info['bloom']
+    # Fallback: if beyond 22, stay in doubt_solving
+    return 'doubt_solving', 'Evaluate/Create'
+
+
 class LearnerSession(BaseModel):
     session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     topic: str
@@ -31,8 +52,10 @@ class LearnerSession(BaseModel):
         'completed'
     ] = 'pre_assessment'
     pre_assessment_turn: int = 0             # counts pre-assessment Q&A turns (max 4)
-    learning_turn: int = 0                   # counts turns within current competency (max 9)
-    max_learning_turns: int = 9
+    learning_turn: int = 0                   # counts turns within current competency (max 22)
+    max_learning_turns: int = 22             # 22 chats per competency
+    teaching_turns: int = 16                 # chats 1-16 are structured teaching
+    doubt_turns: int = 6                     # chats 17-22 are doubt solving
     messages: List[ChatMessage] = Field(default_factory=list)         # full conversation history
     study_materials: Dict[str, str] = Field(default_factory=dict)     # { competency_name: material_text }
     learning_plans: Dict[str, str] = Field(default_factory=dict)      # { competency_name: plan_text }
@@ -54,6 +77,23 @@ class LearnerSession(BaseModel):
             return ""
         safe_index = min(self.current_subpart_index, len(parts) - 1)
         return parts[safe_index]
+
+    @property
+    def chat_stage(self) -> str:
+        """Return the current learning stage name based on learning_turn."""
+        stage, _ = _get_stage_info(self.learning_turn)
+        return stage
+
+    @property
+    def bloom_level(self) -> str:
+        """Return the Bloom's taxonomy level for the current learning stage."""
+        _, bloom = _get_stage_info(self.learning_turn)
+        return bloom
+
+    @property
+    def is_doubt_phase(self) -> bool:
+        """True if the learner is in the doubt-solving phase (chats 15-22)."""
+        return self.learning_turn > self.teaching_turns
 
     @property
     def is_last_competency(self) -> bool:

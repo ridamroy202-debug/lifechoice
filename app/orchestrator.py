@@ -1,5 +1,7 @@
 import json
+import os
 import re
+import yaml
 from app.state import LearnerSession, CompetencyResult
 from app.session_manager import get_session, save_session
 from app.crews.pre_assessment_crew import PreAssessCrew
@@ -11,62 +13,103 @@ from app.crews.assessment_crew import AssessmentCrew
 
 PRE_ASSESSMENT_TURNS = 4
 
-RUBRICS = {
-    'default': {
-        'criteria': [
-            {'name': 'Accuracy',     'weight': 0.40},
-            {'name': 'Depth',        'weight': 0.35},
-            {'name': 'Application',  'weight': 0.25},
-        ]
-    }
-}
+# ── Rubric Loading ──────────────────────────────────────────────────────────
+
+_RUBRICS_CACHE: dict | None = None
+
+def _load_all_rubrics() -> dict:
+    """Load rubrics from YAML file (cached after first call)."""
+    global _RUBRICS_CACHE
+    if _RUBRICS_CACHE is not None:
+        return _RUBRICS_CACHE
+
+    rubrics_path = os.path.join(os.path.dirname(__file__), 'config', 'rubrics.yaml')
+    try:
+        with open(rubrics_path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f) or {}
+    except (FileNotFoundError, yaml.YAMLError):
+        data = {}
+
+    _RUBRICS_CACHE = data
+    return data
+
+
+def _load_rubric(competency: str, user_level: str = 'intermediate') -> dict:
+    """Return a rubric dict for the given competency with level-adjusted weights."""
+    all_rubrics = _load_all_rubrics()
+
+    # Try to find a competency-specific rubric, fall back to default
+    key = competency.lower().replace(' ', '_')
+    rubric = all_rubrics.get(key, all_rubrics.get('default', {}))
+
+    if not rubric or 'criteria' not in rubric:
+        rubric = {
+            'criteria': [
+                {'name': 'Accuracy', 'weight': 0.30},
+                {'name': 'Depth of Understanding', 'weight': 0.25},
+                {'name': 'Application', 'weight': 0.25},
+                {'name': 'Critical Thinking', 'weight': 0.10},
+                {'name': 'Clarity of Expression', 'weight': 0.10},
+            ]
+        }
+
+    # Apply level-adjusted weights if available
+    level_adjustments = all_rubrics.get('level_adjustments', {}).get(user_level, {})
+    if level_adjustments:
+        adjusted_criteria = []
+        total_weight = 0.0
+        for c in rubric['criteria']:
+            modifier = level_adjustments.get(c['name'], 1.0)
+            new_weight = c['weight'] * modifier
+            adjusted = {**c, 'weight': new_weight}
+            adjusted_criteria.append(adjusted)
+            total_weight += new_weight
+        # Normalize weights to sum to 1.0
+        if total_weight > 0:
+            for c in adjusted_criteria:
+                c['weight'] = round(c['weight'] / total_weight, 3)
+        rubric = {'criteria': adjusted_criteria}
+
+    return rubric
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
-def _load_rubric(competency: str) -> dict:
-    """Return a rubric dict for the given competency (fallback to default)."""
-    return RUBRICS.get(competency.lower().replace(' ', '_'), RUBRICS['default'])
-
-
-def _extract_subparts_from_plan(plan_text: str, fallback_turns: int = 9) -> list[str]:
+def _extract_subparts_from_plan(plan_text: str, fallback_turns: int = 22) -> list[str]:
     """Parse planner output into sequential sub-parts."""
     if not plan_text or not plan_text.strip():
-        return [f"Part {i}: Applied practice task." for i in range(1, fallback_turns + 1)]
+        return [f"Part {i}: Applied learning step." for i in range(1, fallback_turns + 1)]
 
     text = plan_text.strip()
-    chunks = re.split(r"\n(?=\s*(?:\d+[\).\:-]|[-*])\s+)", text)
+    chunks = re.split(r"\n(?=\s*(?:\d+[\).:\-]|[-*])\s+)", text)
     parts = [c.strip() for c in chunks if c.strip()]
     cleaned: list[str] = []
 
     if len(parts) <= 1:
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        parts = [ln for ln in lines if re.match(r"^(?:\d+[\).\:-]|[-*])\s+", ln)] or lines
+        parts = [ln for ln in lines if re.match(r"^(?:\d+[\).:\-]|[-*])\s+", ln)] or lines
 
     for part in parts:
-        item = re.sub(r"^\s*(?:\d+[\).\:-]|[-*])\s+", "", part).strip()
+        item = re.sub(r"^\s*(?:\d+[\).:\-]|[-*])\s+", "", part).strip()
         if item:
             cleaned.append(item)
 
     if not cleaned:
-        cleaned = [f"Part {i}: Applied practice task." for i in range(1, fallback_turns + 1)]
+        cleaned = [f"Part {i}: Applied learning step." for i in range(1, fallback_turns + 1)]
+
+    # Pad to fallback_turns if we got fewer items
+    while len(cleaned) < fallback_turns:
+        cleaned.append(f"Part {len(cleaned) + 1}: Continued practice and exploration.")
 
     return cleaned[:fallback_turns]
 
 
 def _is_technical_competency(name: str) -> bool:
     tokens = (
-        "regression",
-        "statistics",
-        "probability",
-        "python",
-        "sql",
-        "analysis",
-        "machine learning",
-        "model",
-        "algorithm",
-        "data",
-        "math",
+        "regression", "statistics", "probability", "python", "sql",
+        "analysis", "machine learning", "model", "algorithm", "data",
+        "math", "programming", "code", "database", "api", "engineering",
+        "architecture", "devops", "cloud", "network",
     )
     lowered = name.lower()
     return any(tok in lowered for tok in tokens)
@@ -121,6 +164,7 @@ async def handle_pre_assessment_start(session: LearnerSession) -> dict:
 
     result = PreAssessCrew().crew().kickoff(inputs={
         'topic': session.topic,
+        'competencies': all_competencies,
         'chat_history': 'No conversation yet.',
         'user_message': f'Please start the pre-assessment for: {all_competencies}',
         'turn_number': 1,
@@ -151,8 +195,11 @@ async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> di
     session.pre_assessment_turn += 1
     session.add_message('user', user_answer)
 
+    all_competencies = ', '.join(session.competencies)
+
     result = PreAssessCrew().crew().kickoff(inputs={
         'topic': session.topic,
+        'competencies': all_competencies,
         'chat_history': session.format_recent_history(),
         'user_message': user_answer,
         'turn_number': session.pre_assessment_turn,
@@ -193,6 +240,8 @@ async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> di
         response['current_subpart_index'] = session.current_subpart_index + 1
         response['current_subpart'] = session.current_subpart
         response['total_subparts'] = len(session.competency_subparts.get(session.current_competency, []))
+        response['chat_stage'] = session.chat_stage
+        response['bloom_level'] = session.bloom_level
         response['message'] = (
             f"Great work on the pre-assessment! Your level has been set to "
             f"**{session.user_level}**. We'll now begin learning: "
@@ -206,7 +255,7 @@ async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> di
 async def handle_learning(session: LearnerSession, user_message: str) -> dict:
     """
     Handles one interactive learning turn for the current competency.
-    Sub-parts are delivered sequentially; learner may ask clarifying questions at any time.
+    Follows the 22-chat structured learning progression with stage-aware behavior.
     """
     session.learning_turn += 1
     session.add_message('user', user_message)
@@ -216,6 +265,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
     total_subparts = len(subparts)
     current_subpart = session.current_subpart
 
+    # Advance sub-part if learner signals readiness
     msg = user_message.lower().strip()
     advance_signals = ['next', 'continue', 'move on', 'go ahead', 'done', 'got it', 'understood']
     should_advance_subpart = any(signal in msg for signal in advance_signals)
@@ -224,6 +274,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
         session.current_subpart_index += 1
         current_subpart = session.current_subpart
 
+    # Clean up sub-part text for the prompt
     cleaned_subpart = re.sub(r"\*\*", "", current_subpart or "").strip()
     subpart_scenario = cleaned_subpart
     subpart_question = ""
@@ -234,11 +285,15 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
 
     competency_is_technical = _is_technical_competency(comp)
 
+    # Get stage-aware context
+    chat_stage = session.chat_stage
+    bloom_level = session.bloom_level
+
     result = TutorCrew().crew().kickoff(inputs={
         'topic': session.topic,
         'competency': comp,
-        'USER_LEVEL': session.user_level,   # match template variable casing
-        'user_level': session.user_level,   # backward compatibility
+        'USER_LEVEL': session.user_level,
+        'user_level': session.user_level,
         'weak_areas': ', '.join(session.weak_areas),
         'chat_history': session.format_recent_history(),
         'user_message': user_message,
@@ -252,6 +307,8 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
         'subpart_index': session.current_subpart_index + 1,
         'total_subparts': total_subparts,
         'study_material': session.study_materials.get(comp, ''),
+        'chat_stage': chat_stage,
+        'bloom_level': bloom_level,
     })
     ai_response = result.raw
     session.add_message('assistant', ai_response)
@@ -274,6 +331,9 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
         'current_subpart_index': session.current_subpart_index + 1,
         'total_subparts': total_subparts,
         'current_subpart': current_subpart,
+        'chat_stage': chat_stage,
+        'bloom_level': bloom_level,
+        'is_doubt_phase': session.is_doubt_phase,
         'message': ai_response,
         'ready_for_assessment': ready_for_assessment,
     }
@@ -285,7 +345,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     On pass/fail, either advances to the next competency or triggers final assessment.
     """
     comp = session.current_competency
-    rubric = _load_rubric(comp)
+    rubric = _load_rubric(comp, session.user_level)
 
     session.add_message('user', user_answer)
 
@@ -351,7 +411,7 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
     Evaluates the learner's final assessment covering all competencies completed.
     """
     all_competencies = ', '.join(session.competencies)
-    rubric = _load_rubric('default')
+    rubric = _load_rubric('default', session.user_level)
 
     session.add_message('user', user_answer)
 

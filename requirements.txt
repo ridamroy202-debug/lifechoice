@@ -7,3 +7,4 @@ langsmith
 python-dotenv
 dotenv
 crewai
+pyyaml

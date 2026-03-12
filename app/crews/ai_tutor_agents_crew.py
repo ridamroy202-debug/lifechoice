@@ -1,9 +1,9 @@
-from crewai import Agent, Task, Crew, Process
+from crewai import Agent, Task, Crew, Process, LLM
 from crewai.project import CrewBase, crew, agent, task
 
 @CrewBase
 class TutorCrew():
-    '''Personalized Tutor Crew'''
+    '''Personalized Tutor Crew — delivers production-grade teaching content'''
 
     agents_config = '../config/agents.yaml'
     tasks_config = '../config/tasks.yaml'
@@ -11,21 +11,25 @@ class TutorCrew():
     @agent
     def tutor(self) -> Agent:
         return Agent(
-            config = self.agents_config['personal_ai_tutor_agent'],
-            verbose = True
+            config=self.agents_config['personal_ai_tutor_agent'],
+            llm=LLM(model='gpt-4o', temperature=0.7),
+            verbose=True,
+            max_iter=3,
         )
+
     @task
     def tutor_task(self) -> Task:
         return Task(
             config=self.tasks_config['ai_tutor_task'],
             agent=self.tutor(),
-            verbose=True
+            verbose=True,
         )
+
     @crew
     def crew(self) -> Crew:
         return Crew(
             agents=[self.tutor()],
             tasks=[self.tutor_task()],
             process=Process.sequential,
-            verbose=True
+            verbose=True,
         )

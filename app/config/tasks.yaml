@@ -1,138 +1,372 @@
+# ─── Pre-Assessment Diagnostic Task ──────────────────────────────────────────
 diagonistic_task:
   description: >
-    Topic: {topic}. This is pre-assessment turn {turn_number}.
+    Topic: {topic}
+    Competencies being assessed: {competencies}
+    This is pre-assessment turn {turn_number} of 4.
+
     Conversation so far:
     {chat_history}
 
     Learner just said: "{user_message}"
 
-    If this is turn 1, introduce yourself briefly and present the first of 4 progressive
-    scenario-based questions (beginner to advanced level). If turn > 1, acknowledge the
-    learner's answer briefly, then ask the next question. Never repeat a question.
-    Keep responses under 200 words.
-  expected_output: >
-    A single short response under 200 words that either presents the next scenario-based
-    question or wraps up the assessment if all questions are answered.
+    ---
+    INSTRUCTIONS:
 
+    If turn_number is 1:
+    - Introduce yourself briefly as a diagnostic specialist (2 sentences max)
+    - Present the FIRST scenario-based question testing basic recall/comprehension
+    - The scenario must be a realistic workplace or project situation
+    - Target: Bloom's Level 1-2 (Remember/Understand)
+
+    If turn_number is 2:
+    - Acknowledge the learner's answer briefly (1 sentence)
+    - Present a MODERATE scenario requiring application of knowledge
+    - Target: Bloom's Level 3 (Apply)
+
+    If turn_number is 3:
+    - Acknowledge briefly, then present a COMPLEX scenario requiring analysis
+    - Target: Bloom's Level 4 (Analyze)
+
+    If turn_number is 4:
+    - Acknowledge briefly, then present an INTEGRATIVE scenario spanning
+      multiple competencies
+    - Target: Bloom's Level 4-5 (Analyze/Evaluate)
+
+    RULES:
+    - Never ask "what is X?" — always use scenario-based questions
+    - Keep each response under 180 words
+    - Each question must target a different competency area when possible
+    - Never repeat a question from the conversation history
+  expected_output: >
+    A single response under 180 words containing a brief acknowledgment
+    (if not turn 1) followed by one scenario-based diagnostic question.
+
+# ─── Level Classification Task ───────────────────────────────────────────────
 level_classifing_task:
   description: >
-    Based on this pre-assessment conversation for topic '{topic}':
+    Analyze this pre-assessment conversation for topic '{topic}':
+
     {chat_history}
 
-    Classify the learner's level as exactly one of: beginner, intermediate, advanced.
-    Identify 1-3 specific weak areas based on their answers.
-    Respond ONLY with valid JSON. No extra text.
+    SCORING INSTRUCTIONS:
+    1. Score each learner response on a 0-100 scale based on demonstrated competency
+    2. Calculate the average score across all responses
+    3. Map to level:
+       - average < 50 → "beginner"
+       - average 50-75 → "intermediate"
+       - average > 75 → "advanced"
+    4. Identify 1-3 specific weak areas (any area scoring below 60)
+    5. Order weak areas by severity (weakest first)
+
+    Respond ONLY with valid JSON. No extra text, no markdown, no explanation.
   expected_output: >
-    A valid JSON object with exactly two keys: "level" (string: beginner/intermediate/advanced)
-    and "weak_areas" (list of strings).
+    A valid JSON object with exactly two keys:
+    "level" (string: beginner/intermediate/advanced)
+    and "weak_areas" (list of specific strings).
     Example: {"level": "beginner", "weak_areas": ["prompt structure", "output control"]}
 
+# ─── Learning Path Planner Task ──────────────────────────────────────────────
 learning_path_planner_task:
   description: >
-    Create a compact 9-turn learning arc for:
+    Design a personalized 22-step learning arc for:
     - Topic: {topic}
-    - Competencies to cover: {competency}
+    - Competency: {competency}
     - Learner level: {user_level}
     - Weak areas to focus on: {weak_areas}
 
-    Plan exactly 9 turns. Each turn must be scenario-based (no theory dumps).
-    Output as a numbered list. Keep each turn description under 60 words.
-  expected_output: >
-    A numbered list of exactly 9 turns. Each item has a "Scenario:" and a "Question:" field.
+    You MUST plan exactly 22 steps following this structure:
 
+    STAGE 1 — Introduction (Steps 1–2):
+      Step 1: Introduce competency + why it matters professionally
+      Step 2: Define 3-5 measurable learning objectives
+
+    STAGE 2 — Core Concepts (Steps 3–6):
+      Step 3: First core concept with real-world framing
+      Step 4: Second core concept, connected to first
+      Step 5: Third core concept with comparisons
+      Step 6: Concept summary and knowledge check
+
+    STAGE 3 — Examples & Deep Explanation (Steps 7–10):
+      Step 7: Simple beginner-friendly worked example
+      Step 8: Real-world professional scenario walkthrough
+      Step 9: Good vs bad comparison examples
+      Step 10: Edge cases and deeper insights
+
+    STAGE 4 — Practice & Exercises (Steps 11–14):
+      Step 11: Simple practice exercise
+      Step 12: Applied real-world problem
+      Step 13: Mini quiz (3-5 questions)
+      Step 14: Feedback and evaluation round
+
+    STAGE 5 — Doubt Solving & Mastery (Steps 15–22):
+      Step 15-16: Clarifications and re-explanations
+      Step 17: Advanced exploration
+      Step 18: Professional tips and tricks
+      Step 19: Common mistakes and pitfalls
+      Step 20: Best practices and expert patterns
+      Step 21: Final reflection and summary
+      Step 22: Competency completion wrap-up
+
+    RULES:
+    - Every step must be scenario-based — no pure theory
+    - Adapt difficulty for {user_level}
+    - Spend extra focus on weak areas: {weak_areas}
+    - Each step description must be under 60 words
+    - Output as a numbered list from 1 to 22
+    - Each item must have "Scenario:" and "Question:" fields
+  expected_output: >
+    A numbered list of exactly 22 steps. Each step has a "Scenario:"
+    describing the teaching context and a "Question:" for learner engagement.
+
+# ─── Scenario Content Generation Task ────────────────────────────────────────
 senario_generation_task:
   description: >
-    Generate study material for:
+    Generate comprehensive study material for:
     - Topic: {topic}
-    - Competencies: {competency}
+    - Competency: {competency}
     - Learner level: {user_level}
 
-    Create 3 real-world applied scenarios. No theory dumps. Each scenario 150-250 words.
-    End each scenario with one clear challenge question for the learner.
-  expected_output: >
-    3 numbered real-world scenarios, each ending with a challenge question.
+    CREATE THE FOLLOWING:
 
+    SECTION 1 — Competency Overview (100-150 words):
+    - What this competency is
+    - Why it matters in industry/profession
+    - When and where it is applied
+    - Prerequisites (what the learner should already know)
+
+    SECTION 2 — Key Vocabulary (5-8 terms):
+    - Term: Definition (one line each)
+
+    SECTION 3 — Core Concepts (3 concepts, 80-120 words each):
+    - Concept name
+    - Clear explanation with an analogy
+    - How it connects to the competency
+
+    SECTION 4 — 5 Graded Scenarios (150-250 words each):
+    - Scenario 1: Easy — tests basic understanding
+    - Scenario 2: Easy-Medium — tests simple application
+    - Scenario 3: Medium — tests multi-step application
+    - Scenario 4: Medium-Hard — tests analysis and comparison
+    - Scenario 5: Hard — tests synthesis and evaluation
+    Each scenario must end with one clear challenge question.
+
+    SECTION 5 — Common Misconceptions (3-5 items):
+    - Misconception → Reality
+
+    RULES:
+    - All content must be scenario-based and applied
+    - Adapt language complexity to {user_level}
+    - Never give theory without a real-world connection
+  expected_output: >
+    Comprehensive study material with 5 sections: Overview, Vocabulary,
+    Core Concepts, 5 Graded Scenarios (each ending with a challenge question),
+    and Common Misconceptions.
+
+# ─── AI Tutor Teaching Task ──────────────────────────────────────────────────
 ai_tutor_task:
   description: >
     You are the AI Tutor. Here is the current session context:
+
+    ═══════════════════════════════════════════════
+    SESSION INFO
+    ═══════════════════════════════════════════════
     - Topic: {topic}
     - Competency: {competency}
     - Learner level: {user_level}
     - Weak areas: {weak_areas}
     - Learning turn: {turn_number} of {max_turns}
     - Current sub-part: {subpart_index} of {total_subparts}
-    - Current sub-part detail: {current_subpart}
-    - Scenario focus for this sub-part: {subpart_scenario}
-    - Intended learner task for this sub-part: {subpart_question}
-    - Technical competency mode: {competency_is_technical}
-    - Response depth target: {response_depth}
+    - Sub-part detail: {current_subpart}
+    - Technical mode: {competency_is_technical}
 
-    Conversation history:
+    ═══════════════════════════════════════════════
+    CURRENT CHAT STAGE
+    ═══════════════════════════════════════════════
+    - Chat stage: {chat_stage}
+    - Bloom's level: {bloom_level}
+
+    ═══════════════════════════════════════════════
+    CONVERSATION HISTORY
+    ═══════════════════════════════════════════════
     {chat_history}
 
     Learner just said: "{user_message}"
 
-    Study material for this session:
+    ═══════════════════════════════════════════════
+    STUDY MATERIAL REFERENCE
+    ═══════════════════════════════════════════════
     {study_material}
 
-    Teach the competency directly in a beginner-friendly but technically accurate way.
-    Use this response structure every turn:
-    1) Concept Teaching: explain the current sub-part in clear, practical language.
-    2) Technical Breakdown: include math/logic when relevant (formula, assumptions, constraints).
-    3) Mini Worked Example: apply to the scenario focus with concrete numbers when possible.
-    4) Learner Action: one specific task for the learner to perform now.
+    ═══════════════════════════════════════════════
+    MANDATORY RESPONSE STRUCTURE
+    ═══════════════════════════════════════════════
+    Your response MUST follow this exact 6-part structure:
 
-    If Technical competency mode is "yes", include all of these:
-    - one simple formula in plain text,
-    - one small markdown table (at least 3 rows),
-    - one short step flow (4-6 ordered steps).
+    1️⃣ **Title**
+    A clear heading describing this lesson segment.
 
-    If learner asks for clarification, simplify the same sub-part and keep them on it.
-    If learner says they are ready to move on, continue to the next sub-part.
-    Never give the final full solution, but do provide practical guidance.
-    Avoid generic prompts like "why do you think...?" unless tied to a concrete applied step.
-    If turn_number >= 8, begin wrapping up and mention that the assessment is coming next.
-    Length target:
-    - Technical mode yes: 320-520 words.
-    - Technical mode no: 220-320 words.
-    End with one clear question or task.
+    2️⃣ **Concept Explanation**
+    Explain the idea in simple, structured terms appropriate for the
+    learner's level ({user_level}). Use short paragraphs, bullet points,
+    or numbered steps. Never dump walls of text.
+
+    3️⃣ **Visual Aid**
+    Include exactly ONE of these in every response:
+    - A markdown table (at least 3 rows)
+    - A comparison (X vs Y format)
+    - A bullet breakdown of a process
+    - A step-by-step numbered list (4-6 steps)
+    - A text-based flow diagram
+
+    4️⃣ **Example**
+    A practical, real-world example demonstrating the concept.
+    Use concrete numbers, names, and situations — never abstract.
+
+    5️⃣ **Key Takeaway**
+    ONE sentence summarizing the most important idea.
+
+    6️⃣ **Quick Check**
+    Ask the student ONE question to test understanding.
+    Make it specific and applied, not "do you understand?"
+
+    ═══════════════════════════════════════════════
+    STAGE-SPECIFIC BEHAVIOR (CRITICAL)
+    ═══════════════════════════════════════════════
+
+    If chat_stage is "introduction":
+    → Be welcoming and enthusiastic. Explain what the competency is,
+      why it matters, and what the learner will achieve. Set expectations.
+
+    If chat_stage is "core_concepts":
+    → Teach clearly with analogies. Build concepts step by step.
+      Each response should cover ONE concept thoroughly.
+
+    If chat_stage is "examples":
+    → Show detailed worked examples. Walk through solutions step by step.
+      Compare approaches. Explore edge cases.
+
+    If chat_stage is "practice":
+    → Give exercises and problems. Evaluate the learner's answers.
+      Provide detailed, constructive feedback. If they got it wrong,
+      re-explain and give them another chance.
+
+    If chat_stage is "doubt_solving":
+    → Answer questions patiently. If no specific question, proactively
+      share tips, common mistakes, best practices, or deeper insights.
+      Prepare the learner for the upcoming assessment.
+
+    ═══════════════════════════════════════════════
+    ADDITIONAL RULES
+    ═══════════════════════════════════════════════
+    - If technical mode is "yes": include formulas in plain text,
+      a markdown table (3+ rows), and a step flow (4-6 steps)
+    - If learner asks a clarification question: answer it clearly,
+      provide a simpler explanation, give an example, then return to flow
+    - If turn_number >= 20: begin mentioning the upcoming assessment
+    - If turn_number == 22: wrap up, summarize key learnings, and tell
+      the learner the assessment is next
+
+    LENGTH TARGETS:
+    - Technical mode yes: 350-550 words
+    - Technical mode no: 250-400 words
+
+    ENGAGEMENT: Always end with a question or task so the learner continues.
+    TONE: Warm, professional, encouraging. Use emoji sparingly (✅ 💡 🎯).
   expected_output: >
-    A descriptive tutor response with Concept Teaching, Technical Breakdown,
-    Mini Worked Example, and one concrete Learner Action task.
+    A structured tutor response following the mandatory 6-part format:
+    Title, Concept Explanation, Visual Aid, Example, Key Takeaway,
+    and Quick Check question. Response must match the current chat stage
+    and Bloom's level.
 
-final_assessment_task:
-  description: >
-    This is the FINAL assessment for the micro-credential on '{topic}'.
-    The learner has completed ALL of the following competencies: {all_competencies}.
-
-    The learner's overall response: {user_response}
-
-    Evaluate holistically across all competencies using this rubric:
-    {rubric_json}
-
-    Consider: Does the learner demonstrate integrated understanding across all competencies?
-    Score 0-100 overall. Pass threshold is 70%.
-    Respond ONLY with valid JSON. No extra text.
-  expected_output: >
-    A valid JSON object with keys: "criteria_scores" (list), "overall_percent" (float),
-    "pass" (bool), "summary" (string). Same format as competency assessment.
-
+# ─── Assessment Evaluation Task ──────────────────────────────────────────────
 assessment_eval_task:
   description: >
     Evaluate this learner response against the rubric below.
 
+    ═══════════════════════════════════════════════
+    ASSESSMENT CONTEXT
+    ═══════════════════════════════════════════════
     Competency being assessed: {competency}
     Scenario presented to learner: {scenario}
-    Learner's response: {user_response}
 
-    Rubric criteria:
+    ═══════════════════════════════════════════════
+    LEARNER'S RESPONSE
+    ═══════════════════════════════════════════════
+    {user_response}
+
+    ═══════════════════════════════════════════════
+    RUBRIC CRITERIA
+    ═══════════════════════════════════════════════
     {rubric_json}
 
-    Score each criterion from 0-100. Be fair but rigorous.
-    A score >= 70 overall means the learner passes.
+    ═══════════════════════════════════════════════
+    SCORING INSTRUCTIONS
+    ═══════════════════════════════════════════════
+    For each criterion in the rubric:
+    1. Read the criterion name and description carefully
+    2. Evaluate the learner's response SPECIFICALLY against that criterion
+    3. Assign a score from 0-100 using this scale:
+       - 90-100 (Exemplary): Mastery with sophisticated insight and application
+       - 75-89 (Proficient): Solid understanding with competent application
+       - 60-74 (Developing): Partial understanding with notable gaps
+       - 40-59 (Beginning): Surface-level response with significant gaps
+       - 0-39 (Insufficient): Little to no relevant understanding
+    4. Write specific feedback citing evidence from the learner's response
+    5. Calculate weighted overall_percent using the criterion weights
+
+    Pass threshold: overall_percent >= 70.0
+
+    RULES:
+    - Be fair but rigorous — this is for professional certification
+    - Always cite specific evidence from the response
+    - Never give scores without justification
+    - If response is off-topic or empty, score 0 with explanation
+    - Respond ONLY with valid JSON. No markdown, no explanation outside JSON.
+  expected_output: >
+    A valid JSON object with keys:
+    "criteria_scores" (list of objects with "criterion", "score", "feedback"),
+    "overall_percent" (float),
+    "pass" (bool),
+    "summary" (string, 2-4 sentences with strengths and improvement areas).
+    Example: {"criteria_scores": [{"criterion": "Accuracy", "score": 78, "feedback": "Correctly identified..."}],
+    "overall_percent": 76.5, "pass": true, "summary": "Strong grasp of core concepts..."}
+
+# ─── Final Assessment Task ───────────────────────────────────────────────────
+final_assessment_task:
+  description: >
+    This is the FINAL comprehensive assessment for the micro-credential on '{topic}'.
+    The learner has completed ALL of the following competencies: {all_competencies}.
+
+    ═══════════════════════════════════════════════
+    LEARNER'S RESPONSE
+    ═══════════════════════════════════════════════
+    {user_response}
+
+    ═══════════════════════════════════════════════
+    RUBRIC CRITERIA
+    ═══════════════════════════════════════════════
+    {rubric_json}
+
+    ═══════════════════════════════════════════════
+    EVALUATION INSTRUCTIONS
+    ═══════════════════════════════════════════════
+    This is an INTEGRATIVE assessment — the learner must demonstrate
+    understanding across ALL competencies, not just one.
+
+    For each rubric criterion:
+    1. Evaluate how well the response demonstrates mastery ACROSS competencies
+    2. Check for integration: Does the learner connect ideas between competencies?
+    3. Score 0-100 per criterion with specific evidence
+    4. Calculate weighted overall_percent
+
+    Additional evaluation dimensions:
+    - Cross-competency integration: Can the learner connect concepts?
+    - Practical application: Can they apply knowledge to real scenarios?
+    - Critical thinking: Do they show analysis beyond surface understanding?
+
+    Pass threshold: overall_percent >= 70.0
     Respond ONLY with valid JSON. No extra text.
   expected_output: >
-    A valid JSON object with keys: "criteria_scores" (list of objects with criterion, score,
-    feedback), "overall_percent" (float), "pass" (bool), "summary" (string, 1-2 sentences).
-    Example: {"criteria_scores": [{"criterion": "Accuracy", "score": 75, "feedback": "Good"}],
-    "overall_percent": 75.0, "pass": true, "summary": "Strong understanding demonstrated."}
+    A valid JSON object with keys: "criteria_scores" (list), "overall_percent" (float),
+    "pass" (bool), "summary" (string). Same format as competency assessment.

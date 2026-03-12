@@ -1,23 +1,127 @@
+# ─── Default Rubric (used when no competency-specific rubric exists) ─────────
 default:
   criteria:
     - name: Accuracy
-      description: Is the answer factually correct for the competency?
-      weight: 0.40
-    - name: Depth
-      description: Does the answer show deep understanding, not surface recall?
-      weight: 0.35
-    - name: Application
-      description: Does the learner apply the concept to the given scenario?
-      weight: 0.25
+      description: >
+        Is the answer factually correct and relevant to the competency?
+        Does it demonstrate understanding of key concepts without errors?
+      weight: 0.30
+      scoring_guide:
+        exemplary: "All facts correct, demonstrates nuanced understanding"
+        proficient: "Mostly correct with minor gaps"
+        developing: "Some correct elements but notable errors or omissions"
+        insufficient: "Major factual errors or irrelevant response"
 
+    - name: Depth of Understanding
+      description: >
+        Does the answer show deep comprehension beyond surface recall?
+        Does the learner explain WHY, not just WHAT?
+      weight: 0.25
+      scoring_guide:
+        exemplary: "Shows sophisticated insight and connects to broader principles"
+        proficient: "Good explanation with reasoning"
+        developing: "Surface-level explanation, mostly recall"
+        insufficient: "No meaningful explanation or reasoning"
+
+    - name: Application
+      description: >
+        Can the learner apply the concept to the given scenario or a real-world situation?
+        Does the response demonstrate practical problem-solving ability?
+      weight: 0.25
+      scoring_guide:
+        exemplary: "Expertly applies concepts to complex scenarios with creative solutions"
+        proficient: "Correctly applies concepts to the scenario"
+        developing: "Attempts application but with significant gaps"
+        insufficient: "No meaningful application demonstrated"
+
+    - name: Critical Thinking
+      description: >
+        Does the learner analyze, compare, or evaluate rather than just recall?
+        Do they consider trade-offs, limitations, or alternative approaches?
+      weight: 0.10
+      scoring_guide:
+        exemplary: "Sophisticated analysis with trade-off considerations"
+        proficient: "Shows analysis and comparison ability"
+        developing: "Minimal analysis, mostly descriptive"
+        insufficient: "No analytical thinking demonstrated"
+
+    - name: Clarity of Expression
+      description: >
+        Is the response well-organized, clear, and coherent?
+        Can the evaluator easily follow the learner's reasoning?
+      weight: 0.10
+      scoring_guide:
+        exemplary: "Exceptionally clear, well-structured, and articulate"
+        proficient: "Clear and organized with logical flow"
+        developing: "Somewhat unclear or poorly organized"
+        insufficient: "Confusing, disorganized, or incoherent"
+
+# ─── Prompt Engineering Rubric ───────────────────────────────────────────────
 prompt_engineering:
   criteria:
     - name: Prompt Structure
-      description: Is the prompt well-structured with clear intent and constraints?
-      weight: 0.35
-    - name: Output Control
-      description: Does the learner show ability to control tone/format/length?
+      description: >
+        Is the prompt well-structured with clear intent, context, and constraints?
+        Does it follow best practices for effective prompting?
       weight: 0.30
+      scoring_guide:
+        exemplary: "Perfect structure with role, context, constraints, and output format"
+        proficient: "Good structure with most key elements present"
+        developing: "Basic structure but missing important elements"
+        insufficient: "Unstructured or vague prompt"
+
+    - name: Output Control
+      description: >
+        Does the learner show ability to control the AI's tone, format, length,
+        and style through prompt design?
+      weight: 0.25
+      scoring_guide:
+        exemplary: "Precise control over multiple output dimensions"
+        proficient: "Controls key output aspects effectively"
+        developing: "Some output control but inconsistent"
+        insufficient: "No output control demonstrated"
+
     - name: Iteration Awareness
-      description: Does the learner demonstrate understanding of iterative refinement?
-      weight: 0.35
+      description: >
+        Does the learner demonstrate understanding of iterative prompt refinement?
+        Can they improve prompts based on output analysis?
+      weight: 0.25
+      scoring_guide:
+        exemplary: "Shows systematic refinement approach with clear rationale"
+        proficient: "Can iterate and improve prompts"
+        developing: "Aware of iteration but struggles with execution"
+        insufficient: "No iteration or refinement attempted"
+
+    - name: Contextual Awareness
+      description: >
+        Does the learner demonstrate understanding of when and how to provide
+        context, examples, and constraints to the AI?
+      weight: 0.20
+      scoring_guide:
+        exemplary: "Excellent use of few-shot examples and context setting"
+        proficient: "Good context usage with appropriate examples"
+        developing: "Minimal context or examples provided"
+        insufficient: "No context awareness demonstrated"
+
+# ─── Level-Adjusted Weight Modifiers ─────────────────────────────────────────
+# These modifiers adjust rubric weights based on learner level.
+# Applied in code: final_weight = base_weight * modifier
+level_adjustments:
+  beginner:
+    Accuracy: 1.3
+    Depth of Understanding: 0.8
+    Application: 0.9
+    Critical Thinking: 0.7
+    Clarity of Expression: 1.2
+  intermediate:
+    Accuracy: 1.0
+    Depth of Understanding: 1.0
+    Application: 1.0
+    Critical Thinking: 1.0
+    Clarity of Expression: 1.0
+  advanced:
+    Accuracy: 0.8
+    Depth of Understanding: 1.1
+    Application: 1.2
+    Critical Thinking: 1.3
+    Clarity of Expression: 0.9

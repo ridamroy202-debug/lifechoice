@@ -3,7 +3,7 @@ from crewai.project import CrewBase, crew, agent, task
 
 @CrewBase
 class AssessmentCrew():
-    '''Rubric-based assessment evaluator powered by Claude Haiku'''
+    '''Rubric-based assessment evaluator powered by Claude Sonnet'''
 
     agents_config = "../config/agents.yaml"
     tasks_config = '../config/tasks.yaml'
@@ -12,15 +12,15 @@ class AssessmentCrew():
     def evaluator(self) -> Agent:
         return Agent(
             config=self.agents_config['assessment_evaluator_agent'],
-            llm=LLM(model='claude-haiku-20240307'),
-            verbose=True
+            llm=LLM(model='claude-sonnet-4-20250514', temperature=0.2),
+            verbose=True,
         )
 
     @task
     def evaluate(self) -> Task:
         return Task(
             config=self.tasks_config['assessment_eval_task'],
-            agent=self.evaluator()
+            agent=self.evaluator(),
         )
 
     @crew
@@ -29,5 +29,5 @@ class AssessmentCrew():
             agents=[self.evaluator()],
             tasks=[self.evaluate()],
             process=Process.sequential,
-            verbose=True
+            verbose=True,
         )

@@ -12,7 +12,7 @@ class StudyMeterial():
     def materials(self) -> Agent:
         return Agent(
             config=self.agents_config['senario_content_generator_agent'],
-            llm=LLM(model='gpt-4o', temperature=0.6),
+            llm=LLM(model='gpt-4o', temperature=0.6, max_tokens=8192),
             verbose=True,
         )
 

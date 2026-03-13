@@ -12,7 +12,7 @@ class TutorCrew():
     def tutor(self) -> Agent:
         return Agent(
             config=self.agents_config['personal_ai_tutor_agent'],
-            llm=LLM(model='gpt-4o', temperature=0.7),
+            llm=LLM(model='gpt-4o', temperature=0.7, max_tokens=4096),
             verbose=True,
             max_iter=3,
         )

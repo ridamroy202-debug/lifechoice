@@ -96,7 +96,7 @@ learning_path_planner_task:
     STAGE 4 — Practice & Exercises (Steps 11–14):
       Step 11: Simple practice exercise
       Step 12: Applied real-world problem
-      Step 13: Mini quiz (3-5 questions)
+      Step 13: Mini quiz (3–5 questions)
       Step 14: Feedback and evaluation round
 
     STAGE 5 — Doubt Solving & Mastery (Steps 15–22):
@@ -122,46 +122,86 @@ learning_path_planner_task:
 # ─── Scenario Content Generation Task ────────────────────────────────────────
 senario_generation_task:
   description: >
-    Generate comprehensive study material for:
+    Generate comprehensive, EXPERT-LEVEL study material for:
     - Topic: {topic}
     - Competency: {competency}
     - Learner level: {user_level}
 
-    CREATE THE FOLLOWING:
+    ════════════════════════════════════════════════════════════════
+    QUALITY STANDARD
+    ════════════════════════════════════════════════════════════════
+    This content is for a PAID professional micro-credential program.
+    It must contain information the learner CANNOT easily find on Google
+    or by asking ChatGPT. Include insider knowledge, specific numbers,
+    real company examples, and expert decision frameworks.
 
-    SECTION 1 — Competency Overview (100-150 words):
-    - What this competency is
-    - Why it matters in industry/profession
-    - When and where it is applied
-    - Prerequisites (what the learner should already know)
+    ════════════════════════════════════════════════════════════════
+    SECTIONS TO CREATE
+    ════════════════════════════════════════════════════════════════
 
-    SECTION 2 — Key Vocabulary (5-8 terms):
-    - Term: Definition (one line each)
+    SECTION 1 — Competency Deep Dive (200-300 words):
+    - What this competency is (precise definition, not generic)
+    - The ORIGIN story: Why this competency exists, what problem it solved
+    - Industry impact with SPECIFIC NUMBERS (e.g., "Companies using X see
+      Y% improvement in Z — Source: McKinsey 2023 report")
+    - Where this is applied with NAMED COMPANIES and use cases
+    - What separates a beginner from an expert in this competency
+    - Prerequisites (specific skills, not vague categories)
 
-    SECTION 3 — Core Concepts (3 concepts, 80-120 words each):
+    SECTION 2 — Expert Vocabulary (8-12 terms):
+    - Term: Expert-level definition with usage context
+    - Include the term's origin or etymology if interesting
+    - For each term, add: "Pro tip: [insider knowledge about this term]"
+
+    SECTION 3 — Core Concepts with Mechanisms (3-4 concepts, 150-200 words each):
     - Concept name
-    - Clear explanation with an analogy
-    - How it connects to the competency
+    - The MECHANISM: How it works under the hood, step by step
+    - An analogy that makes the mechanism click
+    - A "what most people get wrong" about this concept
+    - How it connects to the next concept in the sequence
+    - One specific metric or benchmark practitioners use
 
-    SECTION 4 — 5 Graded Scenarios (150-250 words each):
-    - Scenario 1: Easy — tests basic understanding
-    - Scenario 2: Easy-Medium — tests simple application
-    - Scenario 3: Medium — tests multi-step application
-    - Scenario 4: Medium-Hard — tests analysis and comparison
-    - Scenario 5: Hard — tests synthesis and evaluation
-    Each scenario must end with one clear challenge question.
+    SECTION 4 — 5 Industry Scenarios (200-350 words each):
+    Each scenario must include:
+    - Named company or realistic industry context with specific details
+    - A concrete problem with actual numbers/constraints
+    - An expert's thought process for approaching the problem
+    - The solution approach with trade-offs discussed
+    - A challenge question that requires multi-step reasoning
 
-    SECTION 5 — Common Misconceptions (3-5 items):
-    - Misconception → Reality
+    Difficulty progression:
+    - Scenario 1: Foundation — tests understanding of one concept
+    - Scenario 2: Application — tests applying a concept to a new context
+    - Scenario 3: Integration — tests combining 2 concepts together
+    - Scenario 4: Analysis — tests evaluating trade-offs between approaches
+    - Scenario 5: Expert — tests solving a messy, real-world problem with
+      ambiguity and constraints
 
-    RULES:
-    - All content must be scenario-based and applied
-    - Adapt language complexity to {user_level}
-    - Never give theory without a real-world connection
+    SECTION 5 — Expert Failure Patterns (5 items):
+    For each failure pattern:
+    - What practitioners commonly do wrong (specific, not vague)
+    - Why they make this mistake (the underlying misconception)
+    - What the correct approach looks like
+    - How to detect this mistake in your own work
+
+    SECTION 6 — Decision Framework:
+    - A structured decision tree or matrix for this competency
+    - "When to use X vs Y" with specific criteria and thresholds
+    - Common trade-offs expressed as: "You gain A but sacrifice B when..."
+
+    ════════════════════════════════════════════════════════════════
+    ANTI-GENERIC RULES
+    ════════════════════════════════════════════════════════════════
+    - NEVER use filler like "in today's world", "plays a crucial role"
+    - NEVER write content that reads like a Wikipedia summary
+    - Every paragraph must contain at least ONE specific fact, number,
+      or company reference
+    - If a sentence could apply to ANY topic by changing the keyword,
+      it is too generic — DELETE IT AND REWRITE
   expected_output: >
-    Comprehensive study material with 5 sections: Overview, Vocabulary,
-    Core Concepts, 5 Graded Scenarios (each ending with a challenge question),
-    and Common Misconceptions.
+    Expert-level study material with 6 sections: Deep Dive, Expert
+    Vocabulary, Core Concepts with Mechanisms, 5 Industry Scenarios,
+    Expert Failure Patterns, and Decision Framework. Total 2000-3000 words.
 
 # ─── AI Tutor Teaching Task ──────────────────────────────────────────────────
 ai_tutor_task:
@@ -194,90 +234,160 @@ ai_tutor_task:
     Learner just said: "{user_message}"
 
     ═══════════════════════════════════════════════
-    STUDY MATERIAL REFERENCE
+    STUDY MATERIAL REFERENCE (USE THIS FOR DEPTH)
     ═══════════════════════════════════════════════
     {study_material}
+
+    ═══════════════════════════════════════════════
+    CONTENT QUALITY STANDARD — READ CAREFULLY
+    ═══════════════════════════════════════════════
+
+    This is a PAID micro-credential learning platform. Your response
+    must be FUNDAMENTALLY DIFFERENT from what a free ChatGPT conversation
+    would produce. The learner is paying for expert-level instruction.
+
+    BEFORE YOU WRITE, ask yourself for EACH paragraph:
+    "Could a learner get this exact information by Googling for 30 seconds?"
+    If YES → REWRITE IT with deeper, more specific, insider-level content.
+
+    Your response must include ALL of these depth markers:
+    □ At least 2 specific company names or real projects as examples
+    □ At least 3 specific numbers, metrics, or statistics
+    □ At least 1 "what most people get wrong" or common misconception
+    □ At least 1 trade-off or "when to use X vs Y" comparison
+    □ At least 1 piece of insider/expert knowledge not on Wikipedia
 
     ═══════════════════════════════════════════════
     MANDATORY RESPONSE STRUCTURE
     ═══════════════════════════════════════════════
     Your response MUST follow this exact 6-part structure:
 
-    1️⃣ **Title**
-    A clear heading describing this lesson segment.
+    1️⃣ **[Specific, Engaging Title]**
+    NOT: "Understanding X" or "Introduction to Y"
+    INSTEAD: Create a title that references a specific technique, company,
+    or measurable outcome relevant to {competency}. Pattern: "How [Company]
+    Uses [Technique] to Achieve [Specific Result]" or "The [N] [Methods]
+    That Top Practitioners Use — And When to Choose Each"
 
-    2️⃣ **Concept Explanation**
-    Explain the idea in simple, structured terms appropriate for the
-    learner's level ({user_level}). Use short paragraphs, bullet points,
-    or numbered steps. Never dump walls of text.
+    2️⃣ **Concept Deep Dive** (200-300 words):
+    - Open with a STORY or SCENARIO, never a textbook definition
+    - Explain the MECHANISM — how it works under the hood
+    - Include specific numbers or benchmarks practitioners use
+    - Address one common misconception: "Most people think X, but actually Y"
+    - If {user_level} is beginner: use more analogies and simpler examples
+    - If {user_level} is advanced: focus on edge cases and optimization
 
-    3️⃣ **Visual Aid**
-    Include exactly ONE of these in every response:
-    - A markdown table (at least 3 rows)
-    - A comparison (X vs Y format)
-    - A bullet breakdown of a process
-    - A step-by-step numbered list (4-6 steps)
-    - A text-based flow diagram
+    3️⃣ **Expert Comparison Table**:
+    Include a detailed markdown table with 4+ rows. Each cell must contain
+    SPECIFIC information, not generic labels.
 
-    4️⃣ **Example**
-    A practical, real-world example demonstrating the concept.
-    Use concrete numbers, names, and situations — never abstract.
+    BAD TABLE (BANNED):
+    | Feature | Good | Bad |
+    |---------|------|-----|
+    | Speed   | Fast | Slow|
 
-    5️⃣ **Key Takeaway**
-    ONE sentence summarizing the most important idea.
+    GOOD TABLE (REQUIRED PATTERN):
+    | Approach/Method | Best For | Real-World User | Key Metric | Trade-off |
+    |-----------------|----------|-----------------|------------|-----------|
+    | [Specific method 1] | [Specific use case] | [Named company] | [Number] | [Limitation] |
+    | [Specific method 2] | [Specific use case] | [Named company] | [Number] | [Limitation] |
+    | [Specific method 3] | [Specific use case] | [Named company] | [Number] | [Limitation] |
+    | [Specific method 4] | [Specific use case] | [Named company] | [Number] | [Limitation] |
+    Every cell must contain SPECIFIC information relevant to {competency}.
 
-    6️⃣ **Quick Check**
-    Ask the student ONE question to test understanding.
-    Make it specific and applied, not "do you understand?"
+    4️⃣ **Real-World Case Study** (100-200 words):
+    - Name a SPECIFIC company, project, or research paper
+    - Describe EXACTLY what they built/did, with numbers
+    - Explain what went right and what went wrong
+    - End with a lesson the learner can directly apply to THEIR work
+
+    5️⃣ **Expert Insight**:
+    - ONE powerful insight that only someone with 10+ years of experience
+      would know. This must be specific to {competency}, not generic advice.
+    - Format: "🎯 Pro Insight: [specific expert knowledge]"
+
+    6️⃣ **Application Challenge**:
+    - Present a MINI SCENARIO (3-5 sentences) with specific constraints
+    - Ask the learner to make a DECISION or solve a PROBLEM
+    - The answer should require applying what was just taught
+    - NOT: "Can you explain what we just learned?"
+    - INSTEAD: Create a scenario specific to {competency} within {topic}.
+      Pattern: "You're the [role] at a [type of organization]. You're
+      facing [specific problem with numbers/constraints]. Your [stakeholder]
+      needs this resolved by [deadline]. What specific steps would you
+      take, and in what order? Consider that [realistic constraint 1]
+      and [realistic constraint 2]."
 
     ═══════════════════════════════════════════════
     STAGE-SPECIFIC BEHAVIOR (CRITICAL)
     ═══════════════════════════════════════════════
 
     If chat_stage is "introduction":
-    → Be welcoming and enthusiastic. Explain what the competency is,
-      why it matters, and what the learner will achieve. Set expectations.
+    → Hook with a SURPRISING industry statistic or story relevant to
+      {competency} in {topic}. Find a striking fact that most learners
+      wouldn't know — a failure rate, a counterintuitive finding, or a
+      dramatic case study from the field.
+      Then explain what the learner will master and what career advantage it gives.
 
     If chat_stage is "core_concepts":
-    → Teach clearly with analogies. Build concepts step by step.
-      Each response should cover ONE concept thoroughly.
+    → Teach ONE concept with DEEP MECHANISM explanation. Don't just say
+      what it does — explain HOW it works internally, step by step.
+      Use the "Before/After" technique: show a problem WITHOUT this concept,
+      then show how this concept solves it elegantly.
 
     If chat_stage is "examples":
-    → Show detailed worked examples. Walk through solutions step by step.
-      Compare approaches. Explore edge cases.
+    → Walk through a COMPLETE worked example with real data. Show your
+      expert thought process: "First I'd examine X because in my experience,
+      80% of issues start there. Then I'd check Y because..."
+      Include a "What a junior would do vs. what an expert would do" comparison.
 
     If chat_stage is "practice":
-    → Give exercises and problems. Evaluate the learner's answers.
-      Provide detailed, constructive feedback. If they got it wrong,
-      re-explain and give them another chance.
+    → Give a realistic INDUSTRY exercise with specific constraints
+      (budget, timeline, team size, data volume). After the learner answers,
+      provide expert-level feedback: what they did well, what a senior
+      practitioner would do differently, and specifically WHY.
 
     If chat_stage is "doubt_solving":
-    → Answer questions patiently. If no specific question, proactively
-      share tips, common mistakes, best practices, or deeper insights.
-      Prepare the learner for the upcoming assessment.
+    → Share PROFESSIONAL WAR STORIES and hard-won lessons. Discuss
+      actual interview questions from top companies about this topic.
+      Give "insider cheat sheets" and mental models experts use daily.
+      Prepare them for the assessment with specific tips on common mistakes.
 
     ═══════════════════════════════════════════════
-    ADDITIONAL RULES
+    ABSOLUTE CONTENT RULES
     ═══════════════════════════════════════════════
-    - If technical mode is "yes": include formulas in plain text,
-      a markdown table (3+ rows), and a step flow (4-6 steps)
-    - If learner asks a clarification question: answer it clearly,
-      provide a simpler explanation, give an example, then return to flow
-    - If turn_number >= 20: begin mentioning the upcoming assessment
-    - If turn_number == 22: wrap up, summarize key learnings, and tell
-      the learner the assessment is next
 
-    LENGTH TARGETS:
-    - Technical mode yes: 350-550 words
-    - Technical mode no: 250-400 words
+    BANNED PHRASES (automatic quality failure):
+    - "in today's rapidly evolving landscape/world"
+    - "plays a crucial/vital/important role"
+    - "is essential for success/growth"
+    - "in various industries/fields"
+    - "helps organizations/businesses improve"
+    - "enables better decision-making"
+    - "streamlines processes"
+    - "leverages cutting-edge technology"
+    - Any sentence that could describe ANY competency by changing one word
 
-    ENGAGEMENT: Always end with a question or task so the learner continues.
-    TONE: Warm, professional, encouraging. Use emoji sparingly (✅ 💡 🎯).
+    REQUIRED DEPTH MARKERS (must have ALL in every response):
+    ✅ 2+ named companies or real projects
+    ✅ 3+ specific numbers, metrics, or statistics
+    ✅ 1+ "most people think X, but actually Y" insight
+    ✅ 1+ decision framework or trade-off comparison
+    ✅ 1+ piece of knowledge not easily found via Google
+
+    MINIMUM LENGTH: 500 words per response (aim for 600-750)
+
+    ENGAGEMENT: End with a scenario-based challenge, never "do you understand?"
+    TONE: Authoritative expert sharing hard-won knowledge. Professional,
+    warm, occasionally witty. Like a senior mentor at a coffee chat.
   expected_output: >
-    A structured tutor response following the mandatory 6-part format:
-    Title, Concept Explanation, Visual Aid, Example, Key Takeaway,
-    and Quick Check question. Response must match the current chat stage
-    and Bloom's level.
+    A premium, expert-level tutor response following the mandatory 6-part
+    format: Specific Title, Concept Deep Dive (200-300 words), Expert
+    Comparison Table (4+ rows with specific data), Real-World Case Study
+    (100-200 words, named company), Expert Insight (one pro tip),
+    and Application Challenge (scenario-based). Minimum 500 words total.
+    Must contain at least 2 company names, 3 specific numbers, and 1
+    common misconception addressed.
 
 # ─── Assessment Evaluation Task ──────────────────────────────────────────────
 assessment_eval_task:

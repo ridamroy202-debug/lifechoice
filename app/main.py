@@ -12,8 +12,8 @@ from app.orchestrator import (
 
 app = FastAPI(
     title="LifeChoice AI Engine",
-    version="0.2.0",
-    description="AI-powered micro-credential learning platform with adaptive pre-assessment, interactive tutoring, and rubric-based evaluation.",
+    version="1.0.0",
+    description="Production-grade AI teaching engine for micro-credential learning. Features 22-chat structured learning progression with Bloom's taxonomy alignment, adaptive pre-assessment, interactive scenario-based tutoring, and rubric-based evaluation.",
 )
 
 
@@ -130,10 +130,14 @@ async def pre_assessment_chat(req: PreAssessmentChatRequest):
 async def learn_chat(req: LearnChatRequest):
     """
     Send a message to the AI Tutor for the current competency.
-    The tutor responds with Socratic feedback and teaches sub-parts sequentially.
-    Learner can ask clarification questions at any time; they remain on the same sub-part
-    until they indicate they are ready to continue.
-    Once minimum turns are complete and all sub-parts are covered,
+    The tutor follows a 22-chat structured learning progression:
+    - Chats 1-2: Introduction & Goals
+    - Chats 3-6: Core Concepts (Bloom's: Understand)
+    - Chats 7-10: Examples & Deep Explanation (Bloom's: Apply/Analyze)
+    - Chats 11-14: Practice & Exercises (Bloom's: Apply/Evaluate)
+    - Chats 15-22: Doubt Solving & Mastery (Bloom's: Evaluate/Create)
+
+    Response includes `chat_stage`, `bloom_level`, and `is_doubt_phase` fields.
     `ready_for_assessment: true` signals you should call POST /assessment/competency next.
     """
     session = _get_or_404(req.session_id)
@@ -190,6 +194,9 @@ def get_session_status(session_id: str):
         "pre_assessment_turn": session.pre_assessment_turn,
         "learning_turn": session.learning_turn,
         "max_learning_turns": session.max_learning_turns,
+        "chat_stage": session.chat_stage,
+        "bloom_level": session.bloom_level,
+        "is_doubt_phase": session.is_doubt_phase,
         "completed_competencies": [
             {"competency": r.competency, "score": r.score, "passed": r.passed}
             for r in session.completed_competencies

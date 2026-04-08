@@ -8,3 +8,4 @@ python-dotenv
 dotenv
 crewai
 pyyaml
+requests

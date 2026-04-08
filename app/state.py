@@ -41,6 +41,17 @@ class LearnerSession(BaseModel):
     session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     topic: str
     competencies: List[str]                  # ALL competencies for this micro-credential
+    source: Literal['manual', 'remote'] = 'manual'
+    domain_id: Optional[int] = None
+    remote_micro_credential_id: Optional[int] = None
+    remote_micro_credential_level: Optional[str] = None
+    remote_source: Optional[str] = None
+    remote_auth_token: Optional[str] = None
+    remote_access_id: Optional[int] = None
+    backend_warnings: List[str] = Field(default_factory=list)
+    competency_details: Dict[str, dict] = Field(default_factory=dict)
+    remote_learning_sessions: Dict[str, int] = Field(default_factory=dict)
+    rubric_cache: Dict[str, dict] = Field(default_factory=dict)
     current_competency_index: int = 0        # which competency we're on right now
     user_level: Literal['beginner', 'intermediate', 'advanced'] = 'beginner'
     weak_areas: List[str] = Field(default_factory=list)
@@ -77,6 +88,17 @@ class LearnerSession(BaseModel):
             return ""
         safe_index = min(self.current_subpart_index, len(parts) - 1)
         return parts[safe_index]
+
+    @property
+    def current_remote_competency_id(self) -> Optional[int]:
+        details = self.competency_details.get(self.current_competency, {})
+        remote_id = details.get('id')
+        return int(remote_id) if isinstance(remote_id, int) else remote_id
+
+    @property
+    def current_remote_learning_session_id(self) -> Optional[int]:
+        remote_id = self.remote_learning_sessions.get(self.current_competency)
+        return int(remote_id) if isinstance(remote_id, int) else remote_id
 
     @property
     def chat_stage(self) -> str:

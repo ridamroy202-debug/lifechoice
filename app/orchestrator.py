@@ -4,6 +4,7 @@ import re
 import yaml
 from app.state import LearnerSession, CompetencyResult
 from app.session_manager import get_session, save_session
+from app.remote_backend import RemoteBackendError, remote_backend_client
 from app.crews.pre_assessment_crew import PreAssessCrew
 from app.crews.level_classifier_crew import LevelClassifierCrew
 from app.crews.learning_path_planner import PathPlnner
@@ -12,6 +13,7 @@ from app.crews.ai_tutor_agents_crew import TutorCrew
 from app.crews.assessment_crew import AssessmentCrew
 
 PRE_ASSESSMENT_TURNS = 4
+PASS_THRESHOLD = 75.0
 
 # ── Rubric Loading ──────────────────────────────────────────────────────────
 
@@ -115,13 +117,113 @@ def _is_technical_competency(name: str) -> bool:
     return any(tok in lowered for tok in tokens)
 
 
+def _get_competency_details(session: LearnerSession, competency: str) -> dict:
+    return session.competency_details.get(competency, {})
+
+
+def _competency_prompt_label(session: LearnerSession, competency: str) -> str:
+    details = _get_competency_details(session, competency)
+    description = str(details.get('description') or '').strip()
+    if description:
+        return f"{competency} — {description}"
+    return competency
+
+
+def _normalize_remote_rubric(payload: dict | None) -> dict | None:
+    if not payload:
+        return None
+    raw_criteria = payload.get('rubric_criteria') or {}
+    if isinstance(raw_criteria, dict):
+        iterable = raw_criteria.get('criteria', [])
+    elif isinstance(raw_criteria, list):
+        iterable = raw_criteria
+    else:
+        iterable = []
+
+    criteria = []
+    total = max(1, len(iterable))
+    weight = round(1 / total, 3)
+    for idx, item in enumerate(iterable, start=1):
+        criteria.append(
+            {
+                'name': str(item.get('criterion') or item.get('name') or f'Criterion {idx}'),
+                'description': str(item.get('descriptor') or item.get('met_indicator') or ''),
+                'weight': weight,
+                'criterion_id': str(item.get('id') or f'c{idx}'),
+                'met_indicator': str(item.get('met_indicator') or ''),
+            }
+        )
+    if not criteria:
+        return None
+    return {
+        'criteria': criteria,
+        'pass_threshold': float(payload.get('pass_threshold') or PASS_THRESHOLD),
+        'scenario_template': payload.get('scenario_template'),
+        'difficulty_level': payload.get('difficulty_level'),
+        'source': 'remote',
+    }
+
+
+def _load_assessment_context(session: LearnerSession, competency: str) -> tuple[dict, str, str]:
+    details = _get_competency_details(session, competency)
+    remote_competency_id = details.get('id')
+    if competency in session.rubric_cache:
+        cached = session.rubric_cache[competency]
+        scenario = cached.get('scenario_template') or details.get('description') or session.study_materials.get(competency, 'N/A')
+        return cached, str(scenario), cached.get('source', 'cache')
+
+    if isinstance(remote_competency_id, int):
+        remote_payload = remote_backend_client.fetch_rubric(remote_competency_id)
+        normalized = _normalize_remote_rubric(remote_payload)
+        if normalized:
+            session.rubric_cache[competency] = normalized
+            scenario = normalized.get('scenario_template') or details.get('description') or session.study_materials.get(competency, 'N/A')
+            return normalized, str(scenario), 'remote'
+
+    fallback = _load_rubric(competency, session.user_level)
+    fallback['source'] = 'local_fallback'
+    session.rubric_cache[competency] = fallback
+    warning = f"Remote rubric missing for competency '{competency}'. Using local fallback rubric."
+    if warning not in session.backend_warnings:
+        session.backend_warnings.append(warning)
+    scenario = details.get('description') or session.study_materials.get(competency, 'N/A')
+    return fallback, str(scenario), 'local_fallback'
+
+
+def _ensure_remote_learning_session(session: LearnerSession, competency: str) -> int | None:
+    existing = session.remote_learning_sessions.get(competency)
+    if existing:
+        return existing
+    details = _get_competency_details(session, competency)
+    remote_competency_id = details.get('id')
+    if session.source != 'remote' or not session.remote_access_id or not isinstance(remote_competency_id, int):
+        return None
+    try:
+        payload = remote_backend_client.start_learning_session(
+            mc_access_id=session.remote_access_id,
+            competency_id=remote_competency_id,
+            token=session.remote_auth_token,
+        )
+    except RemoteBackendError as exc:
+        warning = f"Could not start remote learning session for '{competency}': {exc}"
+        if warning not in session.backend_warnings:
+            session.backend_warnings.append(warning)
+        return None
+    remote_session_id = payload.get('id')
+    if isinstance(remote_session_id, int):
+        session.remote_learning_sessions[competency] = remote_session_id
+        return remote_session_id
+    return None
+
+
 async def _setup_competency(session: LearnerSession):
     """Generate study material + learning plan for current competency (if not cached)."""
     comp = session.current_competency
+    competency_label = _competency_prompt_label(session, comp)
     if comp not in session.study_materials:
         material = StudyMeterial().crew().kickoff(inputs={
             'topic': session.topic,
-            'competency': comp,
+            'competency': competency_label,
             'USER_LEVEL': session.user_level,
             'user_level': session.user_level,
         })
@@ -130,7 +232,7 @@ async def _setup_competency(session: LearnerSession):
     if comp not in session.learning_plans:
         plan = PathPlnner().crew().kickoff(inputs={
             'topic': session.topic,
-            'competency': comp,
+            'competency': competency_label,
             'USER_LEVEL': session.user_level,
             'user_level': session.user_level,
             'weak_areas': ', '.join(session.weak_areas),
@@ -261,6 +363,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
     session.add_message('user', user_message)
 
     comp = session.current_competency
+    competency_label = _competency_prompt_label(session, comp)
     subparts = session.competency_subparts.get(comp, [])
     total_subparts = len(subparts)
     current_subpart = session.current_subpart
@@ -284,6 +387,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
         subpart_question = parts[1].strip()
 
     competency_is_technical = _is_technical_competency(comp)
+    remote_learning_session_id = _ensure_remote_learning_session(session, comp)
 
     # Get stage-aware context
     chat_stage = session.chat_stage
@@ -291,7 +395,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
 
     result = TutorCrew().crew().kickoff(inputs={
         'topic': session.topic,
-        'competency': comp,
+        'competency': competency_label,
         'USER_LEVEL': session.user_level,
         'user_level': session.user_level,
         'weak_areas': ', '.join(session.weak_areas),
@@ -312,6 +416,22 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
     })
     ai_response = result.raw
     session.add_message('assistant', ai_response)
+
+    if remote_learning_session_id:
+        try:
+            remote_backend_client.record_interaction(
+                session_id=remote_learning_session_id,
+                interaction_type='teaching',
+                ai_prompt=current_subpart or competency_label,
+                ai_response=ai_response,
+                learner_input=user_message,
+                formative_passed=None,
+                token=session.remote_auth_token,
+            )
+        except RemoteBackendError as exc:
+            warning = f"Remote interaction sync failed for '{comp}': {exc}"
+            if warning not in session.backend_warnings:
+                session.backend_warnings.append(warning)
 
     completed_all_subparts = total_subparts == 0 or session.current_subpart_index >= (total_subparts - 1)
     ready_for_assessment = (
@@ -336,6 +456,9 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict:
         'is_doubt_phase': session.is_doubt_phase,
         'message': ai_response,
         'ready_for_assessment': ready_for_assessment,
+        'source': session.source,
+        'remote_learning_session_id': remote_learning_session_id,
+        'backend_warnings': session.backend_warnings,
     }
 
 
@@ -345,13 +468,15 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     On pass/fail, either advances to the next competency or triggers final assessment.
     """
     comp = session.current_competency
-    rubric = _load_rubric(comp, session.user_level)
+    competency_label = _competency_prompt_label(session, comp)
+    rubric, scenario, rubric_source = _load_assessment_context(session, comp)
+    remote_learning_session_id = _ensure_remote_learning_session(session, comp)
 
     session.add_message('user', user_answer)
 
     result = AssessmentCrew().crew().kickoff(inputs={
-        'competency': comp,
-        'scenario': session.study_materials.get(comp, 'N/A'),
+        'competency': competency_label,
+        'scenario': scenario,
         'user_response': user_answer,
         'rubric_json': json.dumps(rubric),
     })
@@ -363,7 +488,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         eval_data = {'overall_percent': 0.0, 'pass': False, 'summary': result.raw}
 
     overall = eval_data.get('overall_percent', 0.0)
-    passed = eval_data.get('pass', overall >= 70.0)
+    passed = eval_data.get('pass', overall >= PASS_THRESHOLD)
     summary = eval_data.get('summary', '')
 
     comp_result = CompetencyResult(
@@ -380,6 +505,21 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         f"{summary}"
     )
     session.add_message('assistant', ai_response)
+
+    if remote_learning_session_id:
+        try:
+            remote_backend_client.submit_assessment(
+                session_id=remote_learning_session_id,
+                scenario_question=scenario,
+                learner_response=user_answer,
+                rubric_score=overall,
+                ai_feedback=summary or ai_response,
+                token=session.remote_auth_token,
+            )
+        except RemoteBackendError as exc:
+            warning = f"Remote assessment sync failed for '{comp}': {exc}"
+            if warning not in session.backend_warnings:
+                session.backend_warnings.append(warning)
 
     # Decide next phase
     if session.is_last_competency:
@@ -403,6 +543,9 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         'next_action': next_action,
         'next_competency': session.current_competency if not session.is_last_competency else None,
         'assessment_detail': eval_data,
+        'rubric_source': rubric_source,
+        'remote_learning_session_id': remote_learning_session_id,
+        'backend_warnings': session.backend_warnings,
     }
 
 
@@ -428,7 +571,7 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
         eval_data = {'overall_percent': 0.0, 'pass': False, 'summary': result.raw}
 
     overall = eval_data.get('overall_percent', 0.0)
-    passed = eval_data.get('pass', overall >= 70.0)
+    passed = eval_data.get('pass', overall >= PASS_THRESHOLD)
     summary = eval_data.get('summary', '')
 
     session.final_assessment_result = eval_data
@@ -458,4 +601,5 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
         'message': ai_response,
         'competency_breakdown': comp_scores,
         'assessment_detail': eval_data,
+        'backend_warnings': session.backend_warnings,
     }

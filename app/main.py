@@ -1,6 +1,6 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
+from typing import List, Optional
 from app.session_manager import create_session, get_session
 from app.orchestrator import (
     handle_pre_assessment_start,
@@ -9,19 +9,47 @@ from app.orchestrator import (
     handle_competency_assessment,
     handle_final_assessment,
 )
+from app.remote_backend import RemoteBackendError, remote_backend_client
+
+openapi_tags = [
+    {
+        "name": "Sessions",
+        "description": "Create a learner session and inspect its current state.",
+    },
+    {
+        "name": "Pre-Assessment",
+        "description": "Start and continue the pre-assessment flow used to classify the learner.",
+    },
+    {
+        "name": "Learning",
+        "description": "Run the guided tutoring chat for the active competency.",
+    },
+    {
+        "name": "Assessments",
+        "description": "Submit competency and final assessment answers.",
+    },
+    {
+        "name": "Remote Backend",
+        "description": "Proxy authentication and lesson data from the LifeChoice backend.",
+    },
+]
 
 app = FastAPI(
     title="LifeChoice AI Engine",
     version="1.0.0",
-    description="Production-grade AI teaching engine for micro-credential learning. Features 22-chat structured learning progression with Bloom's taxonomy alignment, adaptive pre-assessment, interactive scenario-based tutoring, and rubric-based evaluation.",
+    description="AI teaching engine connected to the remote LifeChoice backend for lesson context, rubrics, enrollment access, and learning session sync.",
+    openapi_tags=openapi_tags,
 )
 
 
 # ── Request Schemas ───────────────────────────────────────────────────────
 
 class StartSessionRequest(BaseModel):
-    topic: str
-    competencies: List[str]
+    topic: Optional[str] = None
+    competencies: List[str] = Field(default_factory=list)
+    domain_id: Optional[int] = None
+    micro_credential_id: Optional[int] = None
+    auth_token: Optional[str] = None
 
 class PreAssessmentChatRequest(BaseModel):
     session_id: str
@@ -43,6 +71,11 @@ class PreAssessmentQuestionsRequest(BaseModel):
     topic: str
     competencies: List[str]
 
+
+class BackendLoginRequest(BaseModel):
+    email: str
+    password: str
+
 # ── Guards ────────────────────────────────────────────────────────────────
 
 def _get_or_404(session_id: str):
@@ -59,25 +92,120 @@ def _require_phase(session, expected: str):
         )
 
 
+def _extract_remote_catalog(payload: dict, domain_id: int, micro_credential_id: int) -> tuple[dict, dict]:
+    domains = payload.get("data", {}).get("domains", [])
+    domain_entry = next((item for item in domains if int(item.get("id", -1)) == int(domain_id)), None)
+    if domain_entry is None:
+        raise HTTPException(status_code=404, detail="Remote domain not found")
+    micro_credentials = domain_entry.get("micro_credentials", [])
+    micro_entry = next((item for item in micro_credentials if int(item.get("id", -1)) == int(micro_credential_id)), None)
+    if micro_entry is None:
+        raise HTTPException(status_code=404, detail="Remote micro-credential not found")
+    return domain_entry, micro_entry
+
+
 # ── Routes ────────────────────────────────────────────────────────────────
 
-@app.post("/session/start", summary="Start a new learning session")
+@app.post("/session/start", summary="Start a new learning session", tags=["Sessions"])
 def start_session(req: StartSessionRequest):
     """
     Creates a new learner session.
     Provide the topic and the full list of competencies to cover (in order).
     Returns a session_id to use in all subsequent calls.
     """
-    if not req.competencies:
-        raise HTTPException(status_code=400, detail="At least one competency is required.")
+    if req.domain_id is not None and req.micro_credential_id is not None:
+        effective_token = req.auth_token or remote_backend_client.default_token or None
+        try:
+            payload = remote_backend_client.fetch_lesson_competencies(
+                domain_id=req.domain_id,
+                micro_credential_id=req.micro_credential_id,
+            )
+        except RemoteBackendError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    session = create_session(topic=req.topic, competencies=req.competencies)
+        domain_entry, micro_entry = _extract_remote_catalog(payload, req.domain_id, req.micro_credential_id)
+        ordered_competencies = sorted(
+            micro_entry.get("competencies", []),
+            key=lambda item: int(item.get("code") or 9999),
+        )
+        competency_titles = [str(item.get("title")) for item in ordered_competencies if item.get("title")]
+        if not competency_titles:
+            raise HTTPException(status_code=400, detail="Remote micro-credential has no competencies")
+
+        warnings: list[str] = []
+        remote_access_id = None
+        if effective_token:
+            try:
+                access = remote_backend_client.check_access(
+                    req.micro_credential_id,
+                    token=effective_token,
+                )
+            except RemoteBackendError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            access_data = access.get("access", {})
+            if access_data.get("can_start_session") is False:
+                raise HTTPException(status_code=403, detail=access_data.get("message") or "Remote backend denied access")
+            enrollment = access_data.get("enrollment") or {}
+            remote_access_id = enrollment.get("id")
+        else:
+            warnings.append("No auth_token provided. Public lesson content is loaded, but enrollment/access and remote session sync will be disabled.")
+
+        competency_details = {
+            str(item["title"]): {
+                "id": item.get("id"),
+                "code": item.get("code"),
+                "description": item.get("description"),
+                "created_at": item.get("created_at"),
+                "updated_at": item.get("updated_at"),
+            }
+            for item in ordered_competencies
+            if item.get("title")
+        }
+
+        session = create_session(
+            topic=str(micro_entry.get("micro_credential") or micro_entry.get("name") or f"MC {req.micro_credential_id}"),
+            competencies=competency_titles,
+            source="remote",
+            domain_id=req.domain_id,
+            remote_micro_credential_id=req.micro_credential_id,
+            remote_micro_credential_level=micro_entry.get("level"),
+            remote_source=domain_entry.get("source"),
+            remote_auth_token=effective_token,
+            remote_access_id=remote_access_id if isinstance(remote_access_id, int) else None,
+            backend_warnings=warnings,
+            competency_details=competency_details,
+        )
+        return {
+            "session_id": session.session_id,
+            "topic": session.topic,
+            "competencies": session.competencies,
+            "total_competencies": len(session.competencies),
+            "phase": session.phase,
+            "source": session.source,
+            "domain_id": session.domain_id,
+            "micro_credential_id": session.remote_micro_credential_id,
+            "remote_access_id": session.remote_access_id,
+            "backend_warnings": session.backend_warnings,
+            "message": (
+                f"Remote session started for '{session.topic}' with {len(session.competencies)} competencies "
+                f"from domain {req.domain_id}. Call POST /pre-assessment/start to begin."
+            ),
+        }
+
+    if not req.topic or not req.competencies:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either topic + competencies, or domain_id + micro_credential_id",
+        )
+
+    session = create_session(topic=req.topic, competencies=req.competencies, source="manual")
     return {
         "session_id": session.session_id,
         "topic": session.topic,
         "competencies": session.competencies,
         "total_competencies": len(session.competencies),
         "phase": session.phase,
+        "source": session.source,
         "message": (
             f"Session started for '{req.topic}' with {len(req.competencies)} competencies. "
             "Call POST /pre-assessment/chat to begin the pre-assessment."
@@ -85,7 +213,11 @@ def start_session(req: StartSessionRequest):
     }
 
 
-@app.post("/pre-assessment/questions", summary="Create session and get the first pre-assessment question")
+@app.post(
+    "/pre-assessment/questions",
+    summary="Create session and get the first pre-assessment question",
+    tags=["Pre-Assessment"],
+)
 async def pre_assessment_questions(req: PreAssessmentQuestionsRequest):
     """
     Convenience endpoint: creates a session *and* immediately returns the first
@@ -99,7 +231,56 @@ async def pre_assessment_questions(req: PreAssessmentQuestionsRequest):
     first_question = await handle_pre_assessment_start(session)
     return first_question
 
-@app.post("/pre-assessment/start", summary="Generate the first pre-assessment question")
+
+@app.post("/backend/auth/login", summary="Login to the remote backend", tags=["Remote Backend"])
+def backend_login(req: BackendLoginRequest):
+    try:
+        payload = remote_backend_client.login(req.email, req.password)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return payload
+
+
+@app.get(
+    "/backend/lesson/competencies",
+    summary="Proxy lesson competencies from the remote backend",
+    tags=["Remote Backend"],
+)
+def backend_lesson_competencies(
+    domain_id: int = Query(...),
+    micro_credential_id: int = Query(...),
+    competency_id: int | None = Query(None),
+):
+    try:
+        payload = remote_backend_client.fetch_lesson_competencies(
+            domain_id=domain_id,
+            micro_credential_id=micro_credential_id,
+            competency_id=competency_id,
+        )
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return payload
+
+
+@app.get(
+    "/backend/lesson/rubric/{competency_id}",
+    summary="Proxy rubric from the remote backend",
+    tags=["Remote Backend"],
+)
+def backend_lesson_rubric(competency_id: int):
+    try:
+        payload = remote_backend_client.fetch_rubric(competency_id)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if not payload:
+        raise HTTPException(status_code=404, detail="Remote rubric not found")
+    return payload
+
+@app.post(
+    "/pre-assessment/start",
+    summary="Generate the first pre-assessment question",
+    tags=["Pre-Assessment"],
+)
 async def pre_assessment_start(req: StartPreAssessmentRequest):
     """
     Call this ONCE right after /session/start.
@@ -112,7 +293,7 @@ async def pre_assessment_start(req: StartPreAssessmentRequest):
     return await handle_pre_assessment_start(session)
 
 
-@app.post("/pre-assessment/chat", summary="Submit a pre-assessment answer")
+@app.post("/pre-assessment/chat", summary="Submit a pre-assessment answer", tags=["Pre-Assessment"])
 async def pre_assessment_chat(req: PreAssessmentChatRequest):
     """
     Submit an answer to the current pre-assessment question.
@@ -126,7 +307,7 @@ async def pre_assessment_chat(req: PreAssessmentChatRequest):
     return await handle_pre_assessment(session, req.answer)
 
 
-@app.post("/learn/chat", summary="Send a message in the learning chat")
+@app.post("/learn/chat", summary="Send a message in the learning chat", tags=["Learning"])
 async def learn_chat(req: LearnChatRequest):
     """
     Send a message to the AI Tutor for the current competency.
@@ -145,7 +326,11 @@ async def learn_chat(req: LearnChatRequest):
     return await handle_learning(session, req.message)
 
 
-@app.post("/assessment/competency", summary="Submit competency assessment answer")
+@app.post(
+    "/assessment/competency",
+    summary="Submit competency assessment answer",
+    tags=["Assessments"],
+)
 async def competency_assessment(req: AssessmentSubmitRequest):
     """
     Submit the learner's answer for the current competency's assessment.
@@ -160,7 +345,7 @@ async def competency_assessment(req: AssessmentSubmitRequest):
     return await handle_competency_assessment(session, req.answer)
 
 
-@app.post("/assessment/final", summary="Submit final assessment answer")
+@app.post("/assessment/final", summary="Submit final assessment answer", tags=["Assessments"])
 async def final_assessment(req: AssessmentSubmitRequest):
     """
     Submit the learner's answer for the final assessment (covers all competencies).
@@ -172,20 +357,37 @@ async def final_assessment(req: AssessmentSubmitRequest):
     return await handle_final_assessment(session, req.answer)
 
 
-@app.get("/session/{session_id}", summary="Get session status")
+@app.get("/session/{session_id}", summary="Get session status", tags=["Sessions"])
 def get_session_status(session_id: str):
     """
     Returns the full current state of a learner session:
     phase, current competency, turn counts, level, scores so far.
     """
     session = _get_or_404(session_id)
+    gamification = None
+    if session.current_remote_learning_session_id and session.remote_auth_token:
+        try:
+            gamification = remote_backend_client.fetch_gamification_progress(
+                session.current_remote_learning_session_id,
+                token=session.remote_auth_token,
+            )
+        except RemoteBackendError:
+            gamification = None
+
     return {
         "session_id": session.session_id,
         "topic": session.topic,
+        "source": session.source,
+        "domain_id": session.domain_id,
+        "remote_micro_credential_id": session.remote_micro_credential_id,
+        "remote_micro_credential_level": session.remote_micro_credential_level,
+        "remote_access_id": session.remote_access_id,
         "phase": session.phase,
         "user_level": session.user_level,
         "weak_areas": session.weak_areas,
         "current_competency": session.current_competency,
+        "current_remote_competency_id": session.current_remote_competency_id,
+        "current_remote_learning_session_id": session.current_remote_learning_session_id,
         "competency_index": session.current_competency_index,
         "current_subpart_index": session.current_subpart_index + 1,
         "current_subpart": session.current_subpart,
@@ -197,6 +399,9 @@ def get_session_status(session_id: str):
         "chat_stage": session.chat_stage,
         "bloom_level": session.bloom_level,
         "is_doubt_phase": session.is_doubt_phase,
+        "backend_warnings": session.backend_warnings,
+        "competency_details": session.competency_details.get(session.current_competency, {}),
+        "gamification_progress": gamification,
         "completed_competencies": [
             {"competency": r.competency, "score": r.score, "passed": r.passed}
             for r in session.completed_competencies

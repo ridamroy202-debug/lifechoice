@@ -4,8 +4,8 @@ from app.state import LearnerSession
 _sessions: Dict[str, LearnerSession] = {}
 
 
-def create_session(topic: str, competencies: List[str]) -> LearnerSession:
-    session = LearnerSession(topic=topic, competencies=competencies)
+def create_session(topic: str, competencies: List[str], **kwargs) -> LearnerSession:
+    session = LearnerSession(topic=topic, competencies=competencies, **kwargs)
     _sessions[session.session_id] = session
     return session
 

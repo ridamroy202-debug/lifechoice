@@ -13,7 +13,7 @@ class PathPlnner():
         return Agent(
             config=self.agents_config['learning_path_planner_agent'],
             llm=LLM(model='gpt-4o-mini', temperature=0.5),
-            verbose=True,
+            verbose=False,
         )
 
     @task
@@ -21,7 +21,7 @@ class PathPlnner():
         return Task(
             config=self.tasks_config['learning_path_planner_task'],
             agent=self.path_agent(),
-            verbose=True,
+            verbose=False,
         )
 
     @crew
@@ -30,5 +30,5 @@ class PathPlnner():
             agents=[self.path_agent()],
             tasks=[self.path_finder()],
             process=Process.sequential,
-            verbose=True,
+            verbose=False,
         )

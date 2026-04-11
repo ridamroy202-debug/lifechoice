@@ -1,8 +1,9 @@
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional
 from app.session_manager import create_session, get_session
 from app.orchestrator import (
+    build_competency_intro,
     handle_pre_assessment_start,
     handle_pre_assessment,
     handle_learning,
@@ -18,7 +19,7 @@ openapi_tags = [
     },
     {
         "name": "Pre-Assessment",
-        "description": "Start and continue the pre-assessment flow used to classify the learner.",
+        "description": "Run the competency pre-assessment used to personalize teaching difficulty.",
     },
     {
         "name": "Learning",
@@ -26,7 +27,7 @@ openapi_tags = [
     },
     {
         "name": "Assessments",
-        "description": "Submit competency and final assessment answers.",
+        "description": "Submit competency assessment answers and inspect completion state.",
     },
     {
         "name": "Remote Backend",
@@ -45,6 +46,7 @@ app = FastAPI(
 # ── Request Schemas ───────────────────────────────────────────────────────
 
 class StartSessionRequest(BaseModel):
+    learner_id: Optional[str] = None
     topic: Optional[str] = None
     competencies: List[str] = Field(default_factory=list)
     domain_id: Optional[int] = None
@@ -57,14 +59,36 @@ class PreAssessmentChatRequest(BaseModel):
 
 class LearnChatRequest(BaseModel):
     session_id: str
-    message: str
+    message: Optional[str] = None
+    answer: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_text(self):
+        if not (self.message or self.answer):
+            raise ValueError("Provide either 'message' or 'answer'.")
+        return self
+
+    @property
+    def text(self) -> str:
+        return str(self.message or self.answer or "")
 
 class StartPreAssessmentRequest(BaseModel):
     session_id: str
 
 class AssessmentSubmitRequest(BaseModel):
     session_id: str
-    answer: str
+    answer: Optional[str] = None
+    message: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_text(self):
+        if not (self.answer or self.message):
+            raise ValueError("Provide either 'answer' or 'message'.")
+        return self
+
+    @property
+    def text(self) -> str:
+        return str(self.answer or self.message or "")
 
 
 class PreAssessmentQuestionsRequest(BaseModel):
@@ -105,6 +129,7 @@ def _extract_remote_catalog(payload: dict, domain_id: int, micro_credential_id: 
 
 
 # ── Routes ────────────────────────────────────────────────────────────────
+
 
 @app.post("/session/start", summary="Start a new learning session", tags=["Sessions"])
 def start_session(req: StartSessionRequest):
@@ -166,6 +191,7 @@ def start_session(req: StartSessionRequest):
             topic=str(micro_entry.get("micro_credential") or micro_entry.get("name") or f"MC {req.micro_credential_id}"),
             competencies=competency_titles,
             source="remote",
+            learner_id=req.learner_id,
             domain_id=req.domain_id,
             remote_micro_credential_id=req.micro_credential_id,
             remote_micro_credential_level=micro_entry.get("level"),
@@ -175,6 +201,7 @@ def start_session(req: StartSessionRequest):
             backend_warnings=warnings,
             competency_details=competency_details,
         )
+        intro_message = build_competency_intro(session)
         return {
             "session_id": session.session_id,
             "topic": session.topic,
@@ -186,10 +213,9 @@ def start_session(req: StartSessionRequest):
             "micro_credential_id": session.remote_micro_credential_id,
             "remote_access_id": session.remote_access_id,
             "backend_warnings": session.backend_warnings,
-            "message": (
-                f"Remote session started for '{session.topic}' with {len(session.competencies)} competencies "
-                f"from domain {req.domain_id}. Call POST /pre-assessment/start to begin."
-            ),
+            "current_competency": session.current_competency,
+            "interaction_number": 1,
+            "message": intro_message,
         }
 
     if not req.topic or not req.competencies:
@@ -198,7 +224,8 @@ def start_session(req: StartSessionRequest):
             detail="Provide either topic + competencies, or domain_id + micro_credential_id",
         )
 
-    session = create_session(topic=req.topic, competencies=req.competencies, source="manual")
+    session = create_session(topic=req.topic, competencies=req.competencies, source="manual", learner_id=req.learner_id)
+    intro_message = build_competency_intro(session)
     return {
         "session_id": session.session_id,
         "topic": session.topic,
@@ -206,10 +233,9 @@ def start_session(req: StartSessionRequest):
         "total_competencies": len(session.competencies),
         "phase": session.phase,
         "source": session.source,
-        "message": (
-            f"Session started for '{req.topic}' with {len(req.competencies)} competencies. "
-            "Call POST /pre-assessment/chat to begin the pre-assessment."
-        ),
+        "current_competency": session.current_competency,
+        "interaction_number": 1,
+        "message": intro_message,
     }
 
 
@@ -228,7 +254,9 @@ async def pre_assessment_questions(req: PreAssessmentQuestionsRequest):
         raise HTTPException(status_code=400, detail="At least one competency is required.")
 
     session = create_session(topic=req.topic, competencies=req.competencies)
+    intro_message = build_competency_intro(session)
     first_question = await handle_pre_assessment_start(session)
+    first_question["intro_message"] = intro_message
     return first_question
 
 
@@ -297,8 +325,8 @@ async def pre_assessment_start(req: StartPreAssessmentRequest):
 async def pre_assessment_chat(req: PreAssessmentChatRequest):
     """
     Submit an answer to the current pre-assessment question.
-    The AI will return the next question, OR — after 4 turns —
-    classify the learner's level and transition to the learning phase.
+    The AI classifies competency readiness from this answer and immediately
+    starts the first teaching interaction for the competency.
 
     Response includes `done: true` and `level` when pre-assessment is complete.
     """
@@ -311,19 +339,19 @@ async def pre_assessment_chat(req: PreAssessmentChatRequest):
 async def learn_chat(req: LearnChatRequest):
     """
     Send a message to the AI Tutor for the current competency.
-    The tutor follows a 22-chat structured learning progression:
-    - Chats 1-2: Introduction & Goals
-    - Chats 3-6: Core Concepts (Bloom's: Understand)
-    - Chats 7-10: Examples & Deep Explanation (Bloom's: Apply/Analyze)
-    - Chats 11-14: Practice & Exercises (Bloom's: Apply/Evaluate)
-    - Chats 15-22: Doubt Solving & Mastery (Bloom's: Evaluate/Create)
+    The tutor now follows a per-competency interaction engine:
+    - Interaction 1: intro
+    - Interaction 2: pre-assessment
+    - Interactions 3-8: personalized teaching with mastery checks
+    - Extra revision turns appear only when the learner fails the mastery gate
 
     Response includes `chat_stage`, `bloom_level`, and `is_doubt_phase` fields.
-    `ready_for_assessment: true` signals you should call POST /assessment/competency next.
+    `ready_for_assessment: true` means the response already contains the
+    assessment prompt and the learner should answer it with POST /assessment/competency.
     """
     session = _get_or_404(req.session_id)
     _require_phase(session, 'learning')
-    return await handle_learning(session, req.message)
+    return await handle_learning(session, req.text)
 
 
 @app.post(
@@ -334,27 +362,26 @@ async def learn_chat(req: LearnChatRequest):
 async def competency_assessment(req: AssessmentSubmitRequest):
     """
     Submit the learner's answer for the current competency's assessment.
-    The AI evaluates using a rubric (powered by Claude Haiku).
+    The AI evaluates using the locked rubric with a fixed 75% pass threshold.
 
     On completion:
-    - If more competencies remain → advances to the next competency (phase: learning)
-    - If last competency → transitions to final assessment (phase: final_assessment)
+    - If more competencies remain -> advances to the next competency intro
+    - If the learner fails -> teaching restarts from interaction 3
+    - If the last competency passes -> the session is completed
     """
     session = _get_or_404(req.session_id)
     _require_phase(session, 'competency_assessment')
-    return await handle_competency_assessment(session, req.answer)
+    return await handle_competency_assessment(session, req.text)
 
 
 @app.post("/assessment/final", summary="Submit final assessment answer", tags=["Assessments"])
 async def final_assessment(req: AssessmentSubmitRequest):
     """
-    Submit the learner's answer for the final assessment (covers all competencies).
-    Returns overall score, pass/fail, and a competency-by-competency breakdown.
-    Session phase becomes 'completed' after this call.
+    Legacy endpoint kept for compatibility. The current engine completes the
+    learner journey after the final competency assessment rather than a separate final.
     """
     session = _get_or_404(req.session_id)
-    _require_phase(session, 'final_assessment')
-    return await handle_final_assessment(session, req.answer)
+    return await handle_final_assessment(session, req.text)
 
 
 @app.get("/session/{session_id}", summary="Get session status", tags=["Sessions"])
@@ -377,6 +404,7 @@ def get_session_status(session_id: str):
     return {
         "session_id": session.session_id,
         "topic": session.topic,
+        "learner_id": session.learner_id,
         "source": session.source,
         "domain_id": session.domain_id,
         "remote_micro_credential_id": session.remote_micro_credential_id,
@@ -385,6 +413,16 @@ def get_session_status(session_id: str):
         "phase": session.phase,
         "user_level": session.user_level,
         "weak_areas": session.weak_areas,
+        "interaction_number": session.competency_interaction,
+        "pre_assessment_completed": session.pre_assessment_completed,
+        "current_difficulty": session.current_difficulty,
+        "formative_check_results": session.formative_check_results,
+        "awaiting_formative_response": session.awaiting_formative_response,
+        "revision_required": session.revision_required,
+        "final_assessment_unlocked": session.final_assessment_unlocked,
+        "current_assessment_attempts": session.current_assessment_attempts,
+        "current_assessment_prompt": session.current_assessment_prompt,
+        "personalization_state": session.personalization_state,
         "current_competency": session.current_competency,
         "current_remote_competency_id": session.current_remote_competency_id,
         "current_remote_learning_session_id": session.current_remote_learning_session_id,
@@ -396,6 +434,7 @@ def get_session_status(session_id: str):
         "pre_assessment_turn": session.pre_assessment_turn,
         "learning_turn": session.learning_turn,
         "max_learning_turns": session.max_learning_turns,
+        "max_competency_interactions": session.max_competency_interactions,
         "chat_stage": session.chat_stage,
         "bloom_level": session.bloom_level,
         "is_doubt_phase": session.is_doubt_phase,
@@ -408,3 +447,5 @@ def get_session_status(session_id: str):
         ],
         "message_count": len(session.messages),
     }
+
+

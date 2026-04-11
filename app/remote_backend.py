@@ -4,6 +4,7 @@ import os
 from typing import Any
 
 import requests
+from requests import RequestException
 from dotenv import load_dotenv
 
 
@@ -37,15 +38,18 @@ class RemoteBackendClient:
         data: dict[str, Any] | None = None,
         allow_404: bool = False,
     ) -> dict[str, Any]:
-        response = requests.request(
-            method,
-            f"{self.base_url}{path}",
-            headers=self._headers(token),
-            params=params,
-            json=json_body,
-            data=data,
-            timeout=45,
-        )
+        try:
+            response = requests.request(
+                method,
+                f"{self.base_url}{path}",
+                headers=self._headers(token),
+                params=params,
+                json=json_body,
+                data=data,
+                timeout=45,
+            )
+        except RequestException as exc:
+            raise RemoteBackendError(f"Remote backend network error for {path}: {exc}") from exc
         if allow_404 and response.status_code == 404:
             return {}
         if response.status_code >= 400:

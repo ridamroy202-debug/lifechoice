@@ -13,7 +13,7 @@ class TutorCrew():
         return Agent(
             config=self.agents_config['personal_ai_tutor_agent'],
             llm=LLM(model='gpt-4o', temperature=0.5, max_tokens=4096),
-            verbose=True,
+            verbose=False,
             max_iter=3,
         )
 
@@ -22,7 +22,7 @@ class TutorCrew():
         return Task(
             config=self.tasks_config['ai_tutor_task'],
             agent=self.tutor(),
-            verbose=True,
+            verbose=False,
         )
 
     @crew
@@ -31,5 +31,5 @@ class TutorCrew():
             agents=[self.tutor()],
             tasks=[self.tutor_task()],
             process=Process.sequential,
-            verbose=True,
+            verbose=False,
         )

@@ -13,7 +13,7 @@ class AssessmentCrew():
         return Agent(
             config=self.agents_config['assessment_evaluator_agent'],
             llm=LLM(model='claude-sonnet-4-20250514', temperature=0.2),
-            verbose=True,
+            verbose=False,
         )
 
     @task
@@ -29,5 +29,5 @@ class AssessmentCrew():
             agents=[self.evaluator()],
             tasks=[self.evaluate()],
             process=Process.sequential,
-            verbose=True,
+            verbose=False,
         )

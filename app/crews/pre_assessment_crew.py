@@ -14,7 +14,7 @@ class PreAssessCrew():
         return Agent(
             config=self.agents_config['diagonistic_agent'],
             llm=LLM(model='gpt-4o-mini', temperature=0.5),
-            verbose=True,
+            verbose=False,
         )
 
     @task
@@ -22,7 +22,7 @@ class PreAssessCrew():
         return Task(
             config=self.tasks_config['diagonistic_task'],
             agent=self.materials(),
-            verbose=True,
+            verbose=False,
         )
 
     @crew
@@ -31,5 +31,5 @@ class PreAssessCrew():
             agents=[self.materials()],
             tasks=[self.materials_maker()],
             process=Process.sequential,
-            verbose=True,
+            verbose=False,
         )

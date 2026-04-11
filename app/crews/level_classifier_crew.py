@@ -12,7 +12,7 @@ class LevelClassifierCrew():
         return Agent(
             config=self.agents_config['level_classifier_agent'],
             llm=LLM(model='gpt-4o-mini'),
-            verbose=True
+            verbose=False
         )
 
     @task
@@ -28,5 +28,5 @@ class LevelClassifierCrew():
             agents=[self.classifier()],
             tasks=[self.classify()],
             process=Process.sequential,
-            verbose=True
+            verbose=False
         )

@@ -1,7 +1,8 @@
-from pydantic import BaseModel, Field
-from typing import List, Literal, Optional, Dict
 from datetime import datetime
+from typing import Dict, List, Literal, Optional
 import uuid
+
+from pydantic import BaseModel, Field
 
 
 class ChatMessage(BaseModel):
@@ -16,31 +17,26 @@ class CompetencyResult(BaseModel):
     feedback: str = ""
 
 
-# ── Chat Stage Mapping ───────────────────────────────────────────────────────
-# Maps chat turn numbers (1-22) to learning stages and Bloom's levels
 STAGE_MAP = {
-    'introduction':  {'turns': (1, 2),   'bloom': 'Remember'},
-    'core_concepts': {'turns': (3, 6),   'bloom': 'Understand'},
-    'examples':      {'turns': (7, 10),  'bloom': 'Apply/Analyze'},
-    'practice':      {'turns': (11, 14), 'bloom': 'Apply/Evaluate'},
-    'doubt_solving': {'turns': (15, 22), 'bloom': 'Evaluate/Create'},
+    'foundation': {'turns': (1, 2), 'bloom': 'Understand'},
+    'guided_application': {'turns': (3, 4), 'bloom': 'Apply'},
+    'mastery_gate': {'turns': (5, 6), 'bloom': 'Analyze/Evaluate'},
+    'revision': {'turns': (7, 8), 'bloom': 'Apply/Evaluate'},
 }
 
 
 def _get_stage_info(turn: int) -> tuple[str, str]:
-    """Return (stage_name, bloom_level) for a given learning turn number."""
     for stage_name, info in STAGE_MAP.items():
         low, high = info['turns']
         if low <= turn <= high:
             return stage_name, info['bloom']
-    # Fallback: if beyond 22, stay in doubt_solving
-    return 'doubt_solving', 'Evaluate/Create'
+    return 'revision', 'Apply/Evaluate'
 
 
 class LearnerSession(BaseModel):
     session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     topic: str
-    competencies: List[str]                  # ALL competencies for this micro-credential
+    competencies: List[str]
     source: Literal['manual', 'remote'] = 'manual'
     domain_id: Optional[int] = None
     remote_micro_credential_id: Optional[int] = None
@@ -52,33 +48,46 @@ class LearnerSession(BaseModel):
     competency_details: Dict[str, dict] = Field(default_factory=dict)
     remote_learning_sessions: Dict[str, int] = Field(default_factory=dict)
     rubric_cache: Dict[str, dict] = Field(default_factory=dict)
-    current_competency_index: int = 0        # which competency we're on right now
+    learner_id: Optional[str] = None
+    current_competency_index: int = 0
     user_level: Literal['beginner', 'intermediate', 'advanced'] = 'beginner'
     weak_areas: List[str] = Field(default_factory=list)
-    phase: Literal[
-        'pre_assessment',
-        'learning',
-        'competency_assessment',
-        'final_assessment',
-        'completed'
-    ] = 'pre_assessment'
-    pre_assessment_turn: int = 0             # counts pre-assessment Q&A turns (max 4)
-    learning_turn: int = 0                   # counts turns within current competency (max 22)
-    max_learning_turns: int = 22             # 22 chats per competency
-    teaching_turns: int = 16                 # chats 1-16 are structured teaching
-    doubt_turns: int = 6                     # chats 17-22 are doubt solving
-    messages: List[ChatMessage] = Field(default_factory=list)         # full conversation history
-    study_materials: Dict[str, str] = Field(default_factory=dict)     # { competency_name: material_text }
-    learning_plans: Dict[str, str] = Field(default_factory=dict)      # { competency_name: plan_text }
+    phase: Literal['pre_assessment', 'learning', 'competency_assessment', 'completed'] = 'pre_assessment'
+    pre_assessment_turn: int = 0
+    competency_interaction: int = 0
+    learning_turn: int = 0
+    max_learning_turns: int = 6
+    max_revision_turns: int = 2
+    max_competency_interactions: int = 12
+    intro_delivered: bool = False
+    pre_assessment_prompt: Optional[str] = None
+    pre_assessment_completed: bool = False
+    formative_check_results: List[bool] = Field(default_factory=list)
+    formative_slots: List[Optional[bool]] = Field(default_factory=list)
+    current_difficulty: Literal['support', 'standard', 'stretch'] = 'standard'
+    consecutive_formative_passes: int = 0
+    consecutive_formative_fails: int = 0
+    awaiting_formative_response: bool = False
+    current_formative_slot: int = -1
+    current_formative_prompt: Optional[str] = None
+    revision_required: bool = False
+    revision_turns_used: int = 0
+    formative_feedback_log: List[dict] = Field(default_factory=list)
+    current_assessment_prompt: Optional[str] = None
+    final_assessment_unlocked: bool = False
+    current_assessment_attempts: int = 0
+    personalization_state: Dict[str, str] = Field(default_factory=dict)
+    delivery_history: List[str] = Field(default_factory=list)
+    messages: List[ChatMessage] = Field(default_factory=list)
+    study_materials: Dict[str, str] = Field(default_factory=dict)
+    learning_plans: Dict[str, str] = Field(default_factory=dict)
     competency_subparts: Dict[str, List[str]] = Field(default_factory=dict)
     current_subpart_index: int = 0
     completed_competencies: List[CompetencyResult] = Field(default_factory=list)
-    final_assessment_result: Optional[dict] = None
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
     @property
     def current_competency(self) -> str:
-        """Return the competency currently being learned/assessed."""
         return self.competencies[self.current_competency_index]
 
     @property
@@ -102,29 +111,29 @@ class LearnerSession(BaseModel):
 
     @property
     def chat_stage(self) -> str:
-        """Return the current learning stage name based on learning_turn."""
         stage, _ = _get_stage_info(self.learning_turn)
         return stage
 
     @property
     def bloom_level(self) -> str:
-        """Return the Bloom's taxonomy level for the current learning stage."""
         _, bloom = _get_stage_info(self.learning_turn)
         return bloom
 
     @property
     def is_doubt_phase(self) -> bool:
-        """True if the learner is in the doubt-solving phase (chats 15-22)."""
-        return self.learning_turn > self.teaching_turns
+        return self.revision_required
 
     @property
     def is_last_competency(self) -> bool:
         return self.current_competency_index >= len(self.competencies) - 1
 
+    @property
+    def max_learning_window(self) -> int:
+        return self.max_learning_turns + self.max_revision_turns
+
     def format_recent_history(self, n: int = 10) -> str:
-        """Last n messages formatted as readable string for crew inputs."""
         if not self.messages:
-            return "No conversation yet."
+            return 'No conversation yet.'
         lines = []
         for msg in self.messages[-n:]:
             prefix = 'Learner' if msg.role == 'user' else 'Tutor'
@@ -135,8 +144,31 @@ class LearnerSession(BaseModel):
         self.messages.append(ChatMessage(role=role, content=content))
 
     def advance_to_next_competency(self):
-        """Move to next competency and reset learning turn counter."""
         self.current_competency_index += 1
+        self.reset_competency_cycle()
+        self.phase = 'pre_assessment'
+
+    def reset_competency_cycle(self):
+        self.pre_assessment_turn = 0
+        self.competency_interaction = 0
         self.learning_turn = 0
+        self.intro_delivered = False
+        self.pre_assessment_prompt = None
+        self.pre_assessment_completed = False
+        self.formative_check_results = []
+        self.formative_slots = []
+        self.current_difficulty = 'standard'
+        self.consecutive_formative_passes = 0
+        self.consecutive_formative_fails = 0
+        self.awaiting_formative_response = False
+        self.current_formative_slot = -1
+        self.current_formative_prompt = None
+        self.revision_required = False
+        self.revision_turns_used = 0
+        self.formative_feedback_log = []
+        self.current_assessment_prompt = None
+        self.final_assessment_unlocked = False
+        self.current_assessment_attempts = 0
         self.current_subpart_index = 0
-        self.phase = 'learning'
+        self.delivery_history = []
+        self.personalization_state = {}

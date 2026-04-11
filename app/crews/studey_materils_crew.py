@@ -13,7 +13,7 @@ class StudyMeterial():
         return Agent(
             config=self.agents_config['senario_content_generator_agent'],
             llm=LLM(model='gpt-4o', temperature=0.3, max_tokens=8192),
-            verbose=True,
+            verbose=False,
         )
 
     @task
@@ -21,7 +21,7 @@ class StudyMeterial():
         return Task(
             config=self.tasks_config['senario_generation_task'],
             agent=self.materials(),
-            verbose=True,
+            verbose=False,
         )
 
     @crew
@@ -30,5 +30,5 @@ class StudyMeterial():
             agents=[self.materials()],
             tasks=[self.generate()],
             process=Process.sequential,
-            verbose=True,
+            verbose=False,
         )

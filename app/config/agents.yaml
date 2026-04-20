@@ -336,7 +336,7 @@ assessment_evaluator_agent:
        - 40–59 (Beginning): Surface-level response with significant gaps
        - 0–39 (Insufficient): Little to no relevant understanding shown
     3. Calculate weighted overall score
-    4. Pass threshold: overall_percent >= 70.0
+    4. Pass threshold: overall_percent >= 75.0
     5. Write a constructive summary (2–4 sentences) highlighting strengths
        and specific areas for improvement
 

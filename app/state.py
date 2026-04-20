@@ -1,5 +1,5 @@
-from datetime import datetime
-from typing import Dict, List, Literal, Optional
+﻿from datetime import datetime, timezone
+from typing import Any, Dict, List, Literal, Optional
 import uuid
 
 from pydantic import BaseModel, Field
@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 class ChatMessage(BaseModel):
     role: Literal['user', 'assistant']
     content: str
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class CompetencyResult(BaseModel):
@@ -23,6 +24,11 @@ STAGE_MAP = {
     'mastery_gate': {'turns': (5, 6), 'bloom': 'Analyze/Evaluate'},
     'revision': {'turns': (7, 8), 'bloom': 'Apply/Evaluate'},
 }
+
+
+POINTS_PER_FORMATIVE_PASS = 10
+STREAK_BONUS_POINTS = 5
+STREAK_BONUS_THRESHOLD = 3
 
 
 def _get_stage_info(turn: int) -> tuple[str, str]:
@@ -47,12 +53,14 @@ class LearnerSession(BaseModel):
     backend_warnings: List[str] = Field(default_factory=list)
     competency_details: Dict[str, dict] = Field(default_factory=dict)
     remote_learning_sessions: Dict[str, int] = Field(default_factory=dict)
-    rubric_cache: Dict[str, dict] = Field(default_factory=dict)
+    learner_profile: Dict[str, Any] = Field(default_factory=dict)
+    identity_verified: bool = False
+    identity_verified_at: Optional[str] = None
     learner_id: Optional[str] = None
     current_competency_index: int = 0
     user_level: Literal['beginner', 'intermediate', 'advanced'] = 'beginner'
     weak_areas: List[str] = Field(default_factory=list)
-    phase: Literal['pre_assessment', 'learning', 'competency_assessment', 'completed'] = 'pre_assessment'
+    phase: Literal['pre_assessment', 'learning', 'competency_assessment', 'final_assessment', 'completed'] = 'pre_assessment'
     pre_assessment_turn: int = 0
     competency_interaction: int = 0
     learning_turn: int = 0
@@ -76,15 +84,29 @@ class LearnerSession(BaseModel):
     current_assessment_prompt: Optional[str] = None
     final_assessment_unlocked: bool = False
     current_assessment_attempts: int = 0
+    final_assessment_prompt: Optional[str] = None
+    final_assessment_attempts: int = 0
     personalization_state: Dict[str, str] = Field(default_factory=dict)
     delivery_history: List[str] = Field(default_factory=list)
     messages: List[ChatMessage] = Field(default_factory=list)
     study_materials: Dict[str, str] = Field(default_factory=dict)
     learning_plans: Dict[str, str] = Field(default_factory=dict)
+    rubric_cache: Dict[str, dict] = Field(default_factory=dict)
     competency_subparts: Dict[str, List[str]] = Field(default_factory=dict)
     current_subpart_index: int = 0
     completed_competencies: List[CompetencyResult] = Field(default_factory=list)
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    competency_attempts: Dict[str, int] = Field(default_factory=dict)
+    points_total: int = 0
+    last_points_delta: int = 0
+    streak_count: int = 0
+    streak_bonus_awarded: bool = False
+    earned_badges: List[dict] = Field(default_factory=list)
+    last_delivery_format: Optional[str] = None
+    last_feedback_message: Optional[str] = None
+    session_summary: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    completed_at: Optional[str] = None
 
     @property
     def current_competency(self) -> str:
@@ -131,6 +153,24 @@ class LearnerSession(BaseModel):
     def max_learning_window(self) -> int:
         return self.max_learning_turns + self.max_revision_turns
 
+    @property
+    def competency_attempt_number(self) -> int:
+        return self.competency_attempts.get(self.current_competency, 1)
+
+    @property
+    def competency_progress_percent(self) -> float:
+        if self.phase in {'competency_assessment', 'final_assessment', 'completed'}:
+            return 100.0
+        return min(100.0, round((self.competency_interaction / max(1, self.max_competency_interactions)) * 100, 2))
+
+    @property
+    def overall_progress_percent(self) -> float:
+        completed = len(self.completed_competencies)
+        total = max(1, len(self.competencies))
+        if self.phase == 'completed':
+            return 100.0
+        return round(((completed + (self.competency_progress_percent / 100.0)) / total) * 100, 2)
+
     def format_recent_history(self, n: int = 10) -> str:
         if not self.messages:
             return 'No conversation yet.'
@@ -142,6 +182,36 @@ class LearnerSession(BaseModel):
 
     def add_message(self, role: str, content: str):
         self.messages.append(ChatMessage(role=role, content=content))
+        self.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def award_points_for_formative(self, passed: bool) -> int:
+        self.streak_bonus_awarded = False
+        if passed:
+            self.streak_count += 1
+            delta = POINTS_PER_FORMATIVE_PASS
+            if self.streak_count >= STREAK_BONUS_THRESHOLD:
+                delta += STREAK_BONUS_POINTS
+                self.streak_bonus_awarded = True
+            self.points_total += delta
+            self.last_points_delta = delta
+            return delta
+
+        self.streak_count = 0
+        self.last_points_delta = 0
+        return 0
+
+    def build_session_summary(self) -> Dict[str, Any]:
+        end_time = self.completed_at or datetime.now(timezone.utc).isoformat()
+        started = datetime.fromisoformat(self.created_at)
+        finished = datetime.fromisoformat(end_time)
+        duration_seconds = max(0, int((finished - started).total_seconds()))
+        self.session_summary = {
+            'total_points': self.points_total,
+            'completed_competencies': len(self.completed_competencies),
+            'badges_earned': len(self.earned_badges),
+            'time_taken_seconds': duration_seconds,
+        }
+        return self.session_summary
 
     def advance_to_next_competency(self):
         self.current_competency_index += 1
@@ -169,6 +239,13 @@ class LearnerSession(BaseModel):
         self.current_assessment_prompt = None
         self.final_assessment_unlocked = False
         self.current_assessment_attempts = 0
+        self.final_assessment_prompt = None
+        self.final_assessment_attempts = 0
         self.current_subpart_index = 0
         self.delivery_history = []
         self.personalization_state = {}
+        self.last_points_delta = 0
+        self.streak_bonus_awarded = False
+        self.last_delivery_format = None
+        self.last_feedback_message = None
+        self.updated_at = datetime.now(timezone.utc).isoformat()

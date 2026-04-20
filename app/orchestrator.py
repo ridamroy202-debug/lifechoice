@@ -12,6 +12,16 @@ from app.crews.learning_path_planner import PathPlnner
 from app.crews.level_classifier_crew import LevelClassifierCrew
 from app.crews.pre_assessment_crew import PreAssessCrew
 from app.crews.studey_materils_crew import StudyMeterial
+from app.persistence import (
+    create_badge,
+    get_locked_rubric,
+    get_rubric_version,
+    record_competency_attempt,
+    record_final_assessment,
+    record_formative_check,
+    utc_now_iso,
+)
+from app.policy import build_gamification_payload, build_session_summary, detect_and_record_anomalies, encouragement_message
 from app.remote_backend import RemoteBackendError, remote_backend_client
 from app.session_manager import save_session
 from app.state import CompetencyResult, LearnerSession
@@ -190,29 +200,18 @@ def _normalize_remote_rubric(payload: dict[str, Any] | None) -> dict[str, Any] |
 
 def _load_assessment_context(session: LearnerSession, competency: str) -> tuple[dict[str, Any], str, str]:
     details = _get_competency_details(session, competency)
-    remote_competency_id = details.get("id")
-
     if competency in session.rubric_cache:
         cached = session.rubric_cache[competency]
         scenario = cached.get("scenario_template") or details.get("description") or session.study_materials.get(competency, "")
-        return cached, str(scenario), cached.get("source", "cache")
+        return cached, str(scenario), "db_locked"
 
-    if isinstance(remote_competency_id, int):
-        remote_payload = remote_backend_client.fetch_rubric(remote_competency_id)
-        normalized = _normalize_remote_rubric(remote_payload)
-        if normalized:
-            session.rubric_cache[competency] = normalized
-            scenario = normalized.get("scenario_template") or details.get("description") or session.study_materials.get(competency, "")
-            return normalized, str(scenario), "remote"
+    locked = get_locked_rubric(competency)
+    if not locked:
+        raise RuntimeError(f"Locked rubric missing for competency '{competency}'. Provision it in the database before assessment.")
 
-    fallback = _load_rubric(competency)
-    fallback["source"] = "local_fallback"
-    session.rubric_cache[competency] = fallback
-    warning = f"Remote rubric missing for competency '{competency}'. Using local fallback rubric."
-    if warning not in session.backend_warnings:
-        session.backend_warnings.append(warning)
-    scenario = details.get("description") or session.study_materials.get(competency, "")
-    return fallback, str(scenario), "local_fallback"
+    session.rubric_cache[competency] = locked
+    scenario = locked.get("scenario_template") or details.get("description") or session.study_materials.get(competency, "")
+    return locked, str(scenario), "db_locked"
 
 
 def _ensure_remote_learning_session(session: LearnerSession, competency: str) -> int | None:
@@ -222,12 +221,11 @@ def _ensure_remote_learning_session(session: LearnerSession, competency: str) ->
 
     details = _get_competency_details(session, competency)
     remote_competency_id = details.get("id")
-    if session.source != "remote" or not session.remote_access_id or not isinstance(remote_competency_id, int):
+    if session.source != "remote" or not isinstance(remote_competency_id, int):
         return None
 
     try:
         payload = remote_backend_client.start_learning_session(
-            mc_access_id=session.remote_access_id,
             competency_id=remote_competency_id,
             token=session.remote_auth_token,
         )
@@ -249,6 +247,50 @@ def _safe_json_loads(raw_text: str, fallback: dict[str, Any]) -> dict[str, Any]:
         return json.loads(raw_text)
     except (json.JSONDecodeError, TypeError):
         return fallback
+
+
+def _normalize_binary_evaluation(evaluation: dict[str, Any], rubric: dict[str, Any]) -> dict[str, Any]:
+    criteria = rubric.get("criteria", [])
+    raw_scores = evaluation.get("criteria_scores") or []
+    by_key: dict[str, dict[str, Any]] = {}
+    for item in raw_scores:
+        key = str(item.get("criterion_id") or item.get("name") or "").strip().lower()
+        if key:
+            by_key[key] = item
+
+    normalized_scores: list[dict[str, Any]] = []
+    total = 0.0
+    for index, criterion in enumerate(criteria, start=1):
+        criterion_id = str(criterion.get("criterion_id") or f"c{index}")
+        weight = float(criterion.get("weight", 0.0) or 0.0)
+        candidate = by_key.get(criterion_id.lower()) or by_key.get(str(criterion.get("name") or "").strip().lower(), {})
+        met_value = candidate.get("met")
+        if met_value is None:
+            raw_score = candidate.get("score") or candidate.get("value")
+            if isinstance(raw_score, (int, float)):
+                met = float(raw_score) >= 75.0
+            else:
+                label = str(candidate.get("rating") or candidate.get("assessment") or "").lower()
+                met = label in {"met", "pass", "passed", "proficient", "yes", "true"}
+        else:
+            met = bool(met_value)
+        evidence = str(candidate.get("evidence") or candidate.get("reason") or candidate.get("summary") or "").strip()
+        normalized_scores.append({
+            "criterion_id": criterion_id,
+            "met": met,
+            "evidence": evidence,
+        })
+        if met:
+            total += weight * 100.0
+
+    overall = round(total, 2)
+    passed = overall >= PASS_THRESHOLD
+    return {
+        "criteria_scores": normalized_scores,
+        "overall_percent": overall,
+        "pass": passed,
+        "summary": str(evaluation.get("summary") or "").strip(),
+    }
 
 
 def _difficulty_from_level(level: str) -> str:
@@ -295,6 +337,7 @@ def _build_personalization_state(session: LearnerSession) -> dict[str, str]:
     }
     session.personalization_state = state
     session.delivery_history.append(delivery_mode)
+    session.last_delivery_format = delivery_mode
     return state
 
 
@@ -363,12 +406,8 @@ def _classify_competency_readiness(session: LearnerSession) -> dict[str, Any]:
     )
 
 
-def _format_formative_feedback(passed: bool, percent: float, summary: str) -> str:
-    prefix = (
-        "You got that formative check right enough to move forward."
-        if passed
-        else "That formative check is not strong enough yet, so I am going to reteach the concept in a different way."
-    )
+def _format_formative_feedback(passed: bool, percent: float, summary: str, *, streak_bonus: bool = False) -> str:
+    prefix = encouragement_message(passed, streak_bonus)
     return f"{prefix} Score: {percent:.1f}%. {summary}".strip()
 
 
@@ -386,9 +425,10 @@ def _all_formative_slots_passed(session: LearnerSession) -> bool:
     return bool(session.formative_slots) and all(item is True for item in session.formative_slots)
 
 
-def _apply_formative_outcome(session: LearnerSession, passed: bool, percent: float, summary: str):
+def _apply_formative_outcome(session: LearnerSession, passed: bool, percent: float, summary: str) -> str:
     _update_formative_slot(session, passed)
-    session.formative_feedback_log.append({"passed": passed, "score": percent, "summary": summary})
+    points_delta = session.award_points_for_formative(passed)
+    session.formative_feedback_log.append({"passed": passed, "score": percent, "summary": summary, "points_delta": points_delta})
     session.awaiting_formative_response = False
     session.current_formative_prompt = None
 
@@ -409,28 +449,34 @@ def _apply_formative_outcome(session: LearnerSession, passed: bool, percent: flo
     if session.learning_turn >= BASE_LEARNING_INTERACTIONS and _all_formative_slots_passed(session):
         session.final_assessment_unlocked = True
 
+    return _format_formative_feedback(passed, percent, summary, streak_bonus=session.streak_bonus_awarded)
+
 
 def _build_formative_rubric(session: LearnerSession) -> dict[str, Any]:
     concept = session.current_subpart or session.current_competency
     return {
         "criteria": [
             {
+                "criterion_id": "formative_accuracy",
                 "name": "Concept accuracy",
                 "description": f"Understands the current concept: {concept}",
                 "weight": 0.34,
             },
             {
+                "criterion_id": "formative_application",
                 "name": "Applied reasoning",
                 "description": "Uses the concept in the scenario rather than only defining it",
                 "weight": 0.33,
             },
             {
+                "criterion_id": "formative_explanation",
                 "name": "Clear explanation",
                 "description": "Explains why the chosen action makes sense",
                 "weight": 0.33,
             },
         ],
         "pass_threshold": PASS_THRESHOLD,
+        "binary_scoring": True,
     }
 
 
@@ -444,10 +490,11 @@ def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -
             "rubric_json": json.dumps(rubric),
         }
     )
-    payload = _safe_json_loads(result.raw, {"overall_percent": 0.0, "pass": False, "summary": result.raw})
-    overall = float(payload.get("overall_percent", 0.0) or 0.0)
-    passed = bool(payload.get("pass", overall >= PASS_THRESHOLD))
-    summary = str(payload.get("summary") or "").strip() or "No detailed formative feedback was returned."
+    payload = _safe_json_loads(result.raw, {"criteria_scores": [], "overall_percent": 0.0, "pass": False, "summary": result.raw})
+    normalized = _normalize_binary_evaluation(payload, rubric)
+    overall = float(normalized.get("overall_percent", 0.0) or 0.0)
+    passed = bool(normalized.get("pass", overall >= PASS_THRESHOLD))
+    summary = str(normalized.get("summary") or "").strip() or "No detailed formative feedback was returned."
     return passed, overall, summary
 
 
@@ -492,6 +539,54 @@ def _generate_assessment_prompt(session: LearnerSession) -> str:
         "4. Mention at least one risk, mistake, or tradeoff you would watch for.\n\n"
         f"Focus especially on: {weakest}.\n"
         f"Passing threshold is **{PASS_THRESHOLD:.0f}%**."
+    )
+
+
+def _build_final_assessment_rubric(session: LearnerSession) -> dict[str, Any]:
+    return {
+        "criteria": [
+            {
+                "name": "Integrated application",
+                "description": "Combines multiple completed competencies into one coherent solution",
+                "weight": 0.30,
+            },
+            {
+                "name": "Scenario reasoning",
+                "description": "Explains why the proposed plan fits the scenario and constraints",
+                "weight": 0.25,
+            },
+            {
+                "name": "Execution detail",
+                "description": "Describes concrete steps, checks, and decisions rather than staying generic",
+                "weight": 0.25,
+            },
+            {
+                "name": "Risk awareness",
+                "description": "Identifies tradeoffs, failure modes, or quality controls",
+                "weight": 0.20,
+            },
+        ],
+        "pass_threshold": PASS_THRESHOLD,
+    }
+
+
+def _generate_final_assessment_prompt(session: LearnerSession) -> str:
+    competency_names = [item.competency for item in session.completed_competencies] or session.competencies
+    focus_list = ", ".join(competency_names)
+    weakest = ", ".join(session.weak_areas[:3]) or "clarity, application, and reasoning"
+    return (
+        f"**Final Micro-Credential Assessment - {session.topic}**\n\n"
+        f"You must now solve one integrated scenario that combines these competencies: **{focus_list}**.\n\n"
+        "Scenario: You are responsible for delivering a real project outcome for a stakeholder. "
+        "Build one response that shows you can combine the full micro-credential skill set in practice.\n\n"
+        "Your answer must include:\n"
+        "1. The project goal and stakeholder need.\n"
+        "2. The step-by-step plan using the relevant competencies together.\n"
+        "3. Why this plan is the right one for the scenario.\n"
+        "4. At least one quality check, risk, or limitation you would manage.\n"
+        "5. The final outcome you expect to deliver.\n\n"
+        f"Pay extra attention to these weaker areas: {weakest}.\n"
+        f"Pass threshold: **{PASS_THRESHOLD:.0f}%**."
     )
 
 
@@ -625,12 +720,21 @@ async def handle_pre_assessment_start(session: LearnerSession) -> dict[str, Any]
 
 async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> dict[str, Any]:
     session.add_message("user", user_answer)
+    anomalies = detect_and_record_anomalies(session, user_answer, "/pre-assessment/chat")
     classifier_payload = _classify_competency_readiness(session)
     session.user_level = classifier_payload.get("level", session.user_level)
     session.weak_areas = classifier_payload.get("weak_areas", session.weak_areas)
     session.current_difficulty = _difficulty_from_level(session.user_level)
     session.pre_assessment_completed = True
     session.phase = "learning"
+
+    session.competency_attempts[session.current_competency] = session.competency_attempts.get(session.current_competency, 1)
+    record_competency_attempt(
+        session.session_id,
+        session.current_competency,
+        session.competency_attempt_number,
+        "in_progress",
+    )
 
     await _setup_competency(session)
 
@@ -667,6 +771,8 @@ async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> di
         "message": teaching_response,
         "ready_for_assessment": False,
         "personalization_state": session.personalization_state,
+        "gamification": build_gamification_payload(session),
+        "anomaly_flags": anomalies,
     }
 
 
@@ -676,14 +782,27 @@ def _learning_window_exhausted(session: LearnerSession) -> bool:
 
 async def handle_learning(session: LearnerSession, user_message: str) -> dict[str, Any]:
     session.add_message("user", user_message)
+    anomalies = detect_and_record_anomalies(session, user_message, "/learn/chat")
     competency = session.current_competency
     formative_feedback = ""
     formative_passed: bool | None = None
 
     if session.awaiting_formative_response:
         formative_passed, formative_percent, formative_summary = _evaluate_formative_response(session, user_message)
-        formative_feedback = _format_formative_feedback(formative_passed, formative_percent, formative_summary)
-        _apply_formative_outcome(session, formative_passed, formative_percent, formative_summary)
+        formative_feedback = _apply_formative_outcome(session, formative_passed, formative_percent, formative_summary)
+        record_formative_check(
+            session.session_id,
+            competency,
+            session.competency_attempt_number,
+            session.current_formative_slot,
+            passed=formative_passed,
+            score=formative_percent,
+            learner_response=user_message,
+            feedback=formative_feedback,
+            difficulty_tier=session.current_difficulty,
+            delivery_format=session.personalization_state.get("delivery_mode") or session.last_delivery_format or "explanation",
+        )
+        session.last_feedback_message = formative_feedback
 
     if session.final_assessment_unlocked:
         session.phase = "competency_assessment"
@@ -699,6 +818,8 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
             "message": session.current_assessment_prompt,
             "assessment_prompt": session.current_assessment_prompt,
             "ready_for_assessment": True,
+            "gamification": build_gamification_payload(session),
+            "anomaly_flags": anomalies,
             "backend_warnings": session.backend_warnings,
         }
 
@@ -707,7 +828,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
         _reset_learning_after_assessment_fail(session)
         session.learning_turn = 1
         session.competency_interaction = 3
-        relearn_feedback = "Mastery gate not met. Restart from interaction 3 and reteach the weakest concepts with simpler explanations."
+        relearn_feedback = "Mastery gate not met. Restart from interaction 3 and reteach the weakest concepts with simpler explanations and a different format."
         ai_response = _generate_learning_response(session, user_message, relearn_feedback)
         _record_remote_teaching_interaction(
             session,
@@ -727,6 +848,8 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
             "message": ai_response,
             "ready_for_assessment": False,
             "mastery_reset": True,
+            "gamification": build_gamification_payload(session),
+            "anomaly_flags": anomalies,
             "backend_warnings": session.backend_warnings,
         }
 
@@ -765,6 +888,8 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
         "message": ai_response,
         "ready_for_assessment": False,
         "personalization_state": session.personalization_state,
+        "gamification": build_gamification_payload(session),
+        "anomaly_flags": anomalies,
         "backend_warnings": session.backend_warnings,
     }
 
@@ -776,6 +901,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     prompt = session.current_assessment_prompt or _generate_assessment_prompt(session)
     session.current_assessment_attempts += 1
     session.add_message("user", user_answer)
+    anomalies = detect_and_record_anomalies(session, user_answer, "/assessment/competency", is_assessment=True)
 
     result = AssessmentCrew().crew().kickoff(
         inputs={
@@ -785,10 +911,13 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
             "rubric_json": json.dumps(rubric),
         }
     )
-    evaluation = _safe_json_loads(result.raw, {"overall_percent": 0.0, "pass": False, "summary": result.raw})
-    overall = float(evaluation.get("overall_percent", 0.0) or 0.0)
-    passed = bool(evaluation.get("pass", overall >= PASS_THRESHOLD))
-    summary = str(evaluation.get("summary") or "").strip() or "No assessment summary returned."
+    evaluation = _safe_json_loads(result.raw, {"criteria_scores": [], "overall_percent": 0.0, "pass": False, "summary": result.raw})
+    normalized = _normalize_binary_evaluation(evaluation, rubric)
+    overall = float(normalized.get("overall_percent", 0.0) or 0.0)
+    passed = bool(normalized.get("pass", overall >= PASS_THRESHOLD))
+    summary = str(normalized.get("summary") or "").strip() or "No assessment summary returned."
+    rubric_key = rubric.get("rubric_key") or competency
+    rubric_version = get_rubric_version(competency)
 
     remote_learning_session_id = _ensure_remote_learning_session(session, competency)
     if remote_learning_session_id:
@@ -807,6 +936,15 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
                 session.backend_warnings.append(warning)
 
     if passed:
+        record_competency_attempt(
+            session.session_id,
+            competency,
+            session.competency_attempt_number,
+            "passed",
+            score=overall,
+            rubric_key=rubric_key,
+            evaluation={**normalized, "rubric_version": rubric_version},
+        )
         session.completed_competencies.append(
             CompetencyResult(
                 competency=competency,
@@ -815,27 +953,44 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
                 feedback=summary,
             )
         )
+        badge = create_badge(
+            session.session_id,
+            session.learner_id,
+            competency,
+            f"{competency} Badge",
+            {"score": overall, "awarded_date": utc_now_iso()},
+        )
+        session.earned_badges.append(badge)
         session.add_message("assistant", summary)
         if session.is_last_competency:
-            session.phase = "completed"
+            session.phase = "final_assessment"
+            session.final_assessment_prompt = _generate_final_assessment_prompt(session)
+            session.add_message("assistant", session.final_assessment_prompt)
             save_session(session)
             return {
                 "session_id": session.session_id,
-                "phase": "completed",
+                "phase": "final_assessment",
                 "assessed_competency": competency,
                 "score": overall,
                 "passed": True,
                 "message": (
                     f"Assessment passed for **{competency}** with **{overall:.1f}%**. "
-                    "All competencies are complete. Credential can now be issued."
+                    "All competency assessments are complete. Continue with the final micro-credential assessment."
                 ),
-                "assessment_detail": evaluation,
+                "assessment_detail": normalized,
                 "rubric_source": rubric_source,
+                "rubric_version": rubric_version,
+                "final_assessment_prompt": session.final_assessment_prompt,
+                "ready_for_final_assessment": True,
+                "gamification": build_gamification_payload(session, competency_badge=badge),
+                "anomaly_flags": anomalies,
                 "backend_warnings": session.backend_warnings,
             }
 
         session.advance_to_next_competency()
+        session.competency_attempts[session.current_competency] = 1
         next_intro = build_competency_intro(session)
+        record_competency_attempt(session.session_id, session.current_competency, session.competency_attempt_number, "in_progress")
         save_session(session)
         return {
             "session_id": session.session_id,
@@ -847,18 +1002,31 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
                 f"Assessment passed for **{competency}** with **{overall:.1f}%**. "
                 f"Next competency: **{session.current_competency}**.\n\n{next_intro}"
             ),
-            "assessment_detail": evaluation,
+            "assessment_detail": normalized,
             "rubric_source": rubric_source,
+            "rubric_version": rubric_version,
             "next_competency": session.current_competency,
+            "gamification": build_gamification_payload(session, competency_badge=badge),
+            "anomaly_flags": anomalies,
             "backend_warnings": session.backend_warnings,
         }
 
+    record_competency_attempt(
+        session.session_id,
+        competency,
+        session.competency_attempt_number,
+        "failed",
+        score=overall,
+        rubric_key=rubric_key,
+        evaluation={**normalized, "rubric_version": rubric_version},
+    )
+    session.competency_attempts[competency] = session.competency_attempt_number + 1
     _reset_learning_after_assessment_fail(session)
     session.learning_turn = 1
     session.competency_interaction = 3
     relearn_feedback = (
         f"Assessment score was {overall:.1f}%. Restart from interaction 3. "
-        "Use the assessment feedback to reteach the weakest concepts."
+        "Use the assessment feedback to reteach the weakest concepts in a different format."
     )
     learning_message = _generate_learning_response(session, user_answer, relearn_feedback)
     _record_remote_teaching_interaction(
@@ -878,26 +1046,78 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         "passed": False,
         "message": learning_message,
         "assessment_feedback": summary,
-        "assessment_detail": evaluation,
+        "assessment_detail": normalized,
         "rubric_source": rubric_source,
+        "rubric_version": rubric_version,
         "interaction_number": session.competency_interaction,
+        "gamification": build_gamification_payload(session),
+        "anomaly_flags": anomalies,
         "backend_warnings": session.backend_warnings,
     }
 
 
 async def handle_final_assessment(session: LearnerSession, user_answer: str) -> dict[str, Any]:
+    prompt = session.final_assessment_prompt or _generate_final_assessment_prompt(session)
+    rubric = _build_final_assessment_rubric(session)
+    session.final_assessment_attempts += 1
     session.add_message("user", user_answer)
-    summary = {
-        "competencies_completed": len(session.completed_competencies),
-        "total_competencies": len(session.competencies),
-        "final_answer_received": True,
-    }
-    session.phase = "completed"
+    anomalies = detect_and_record_anomalies(session, user_answer, "/assessment/final", is_assessment=True)
+
+    result = AssessmentCrew().crew().kickoff(
+        inputs={
+            "competency": f"Final micro-credential assessment for {session.topic}",
+            "scenario": prompt,
+            "user_response": user_answer,
+            "rubric_json": json.dumps(rubric),
+        }
+    )
+    evaluation = _safe_json_loads(result.raw, {"criteria_scores": [], "overall_percent": 0.0, "pass": False, "summary": result.raw})
+    normalized = _normalize_binary_evaluation(evaluation, rubric)
+    overall = float(normalized.get("overall_percent", 0.0) or 0.0)
+    passed = bool(normalized.get("pass", overall >= PASS_THRESHOLD))
+    summary = str(normalized.get("summary") or "").strip() or "No final assessment summary returned."
+    record_final_assessment(session.session_id, session.final_assessment_attempts, prompt, user_answer, normalized, overall, passed)
+
+    if passed:
+        session.phase = "completed"
+        session.completed_at = utc_now_iso()
+        session.add_message("assistant", summary)
+        session_summary = build_session_summary(session)
+        save_session(session)
+        return {
+            "session_id": session.session_id,
+            "phase": "completed",
+            "passed": True,
+            "score": overall,
+            "message": (
+                f"Final assessment passed with **{overall:.1f}%**. "
+                "The full micro-credential is complete. Certificate generation is now available."
+            ),
+            "assessment_detail": normalized,
+            "final_assessment_prompt": prompt,
+            "gamification": build_gamification_payload(session),
+            "session_summary": session_summary,
+            "anomaly_flags": anomalies,
+            "backend_warnings": session.backend_warnings,
+        }
+
+    retry_prompt = (
+        f"Final assessment score was {overall:.1f}%. Review the feedback and answer a refined integrated scenario.\n\n{prompt}"
+    )
+    session.phase = "final_assessment"
+    session.final_assessment_prompt = retry_prompt
+    session.add_message("assistant", summary)
     save_session(session)
     return {
         "session_id": session.session_id,
-        "phase": "completed",
-        "message": "This engine now completes the credential after the final competency assessment. No separate final assessment is required.",
-        "summary": summary,
+        "phase": "final_assessment",
+        "passed": False,
+        "score": overall,
+        "message": summary,
+        "assessment_detail": normalized,
+        "final_assessment_prompt": retry_prompt,
+        "retry_allowed": True,
+        "gamification": build_gamification_payload(session),
+        "anomaly_flags": anomalies,
         "backend_warnings": session.backend_warnings,
     }

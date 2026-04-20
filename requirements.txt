@@ -9,3 +9,5 @@ dotenv
 crewai
 pyyaml
 requests
+qrcode[pil]
+reportlab

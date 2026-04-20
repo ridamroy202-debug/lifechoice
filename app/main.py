@@ -1,7 +1,16 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
-from typing import List, Optional
+from typing import Any, List, Optional
 from app.session_manager import create_session, get_session
+from fastapi.responses import HTMLResponse, Response
+from app.certificates import (
+    get_certificate,
+    issue_certificate,
+    render_certificate_html,
+    render_certificate_pdf,
+    render_qr_png,
+)
+from app.db import init_db
 from app.orchestrator import (
     build_competency_intro,
     handle_pre_assessment_start,
@@ -10,6 +19,17 @@ from app.orchestrator import (
     handle_competency_assessment,
     handle_final_assessment,
 )
+from app.persistence import (
+    append_event_log,
+    get_locked_rubric,
+    get_unresolved_anomalies,
+    list_badges,
+    missing_locked_rubrics,
+    seed_locked_rubrics_from_yaml,
+    upsert_learner,
+    upsert_locked_rubric,
+)
+from app.policy import build_gamification_payload
 from app.remote_backend import RemoteBackendError, remote_backend_client
 
 openapi_tags = [
@@ -33,6 +53,10 @@ openapi_tags = [
         "name": "Remote Backend",
         "description": "Proxy authentication and lesson data from the LifeChoice backend.",
     },
+    {
+        "name": "Certificates",
+        "description": "Issue and verify learner certificates after successful completion.",
+    },
 ]
 
 app = FastAPI(
@@ -41,6 +65,16 @@ app = FastAPI(
     description="AI teaching engine connected to the remote LifeChoice backend for lesson context, rubrics, enrollment access, and learning session sync.",
     openapi_tags=openapi_tags,
 )
+
+
+@app.on_event("startup")
+def startup_event():
+    init_db()
+    seed_locked_rubrics_from_yaml()
+
+
+def _log_event(session_id: str | None, learner_id: str | None, route: str, event_type: str, payload: dict[str, Any]) -> None:
+    append_event_log(session_id, learner_id, route, event_type, payload)
 
 
 # ── Request Schemas ───────────────────────────────────────────────────────
@@ -100,6 +134,32 @@ class BackendLoginRequest(BaseModel):
     email: str
     password: str
 
+
+class CertificateGenerateRequest(BaseModel):
+    session_id: str
+    auth_token: Optional[str] = None
+
+
+class LockedRubricRegisterRequest(BaseModel):
+    competency_name: str
+    rubric_json: dict[str, Any]
+    version: int = 1
+    display_name: Optional[str] = None
+
+
+class CertificateViewResponse(BaseModel):
+    certificate_id: str
+    learner_name: str
+    learner_email: Optional[str] = None
+    micro_credential_title: str
+    issue_date: str
+    verification_url: str
+    qr_code_url: str
+    pdf_url: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    competencies: List[dict[str, Any]] = Field(default_factory=list)
+    certificate_html: Optional[str] = None
+
 # ── Guards ────────────────────────────────────────────────────────────────
 
 def _get_or_404(session_id: str):
@@ -128,6 +188,26 @@ def _extract_remote_catalog(payload: dict, domain_id: int, micro_credential_id: 
     return domain_entry, micro_entry
 
 
+def _public_base_url(request: Request) -> str:
+    return str(request.base_url).rstrip("/")
+
+
+def _certificate_response(record, include_html: bool = True) -> CertificateViewResponse:
+    return CertificateViewResponse(
+        certificate_id=record.certificate_id,
+        learner_name=record.learner_name,
+        learner_email=record.learner_email,
+        micro_credential_title=record.micro_credential_title,
+        issue_date=record.issue_date,
+        verification_url=record.verification_url,
+        qr_code_url=record.qr_code_url,
+        pdf_url=record.pdf_url,
+        metadata=record.metadata,
+        competencies=record.competencies,
+        certificate_html=render_certificate_html(record) if include_html else None,
+    )
+
+
 # ── Routes ────────────────────────────────────────────────────────────────
 
 
@@ -140,11 +220,18 @@ def start_session(req: StartSessionRequest):
     """
     if req.domain_id is not None and req.micro_credential_id is not None:
         effective_token = req.auth_token or remote_backend_client.default_token or None
+        if not effective_token:
+            raise HTTPException(status_code=400, detail="auth_token is required for remote-backed learning sessions.")
         try:
             payload = remote_backend_client.fetch_lesson_competencies(
                 domain_id=req.domain_id,
                 micro_credential_id=req.micro_credential_id,
             )
+            access = remote_backend_client.check_access(
+                req.micro_credential_id,
+                token=effective_token,
+            )
+            profile_payload = remote_backend_client.fetch_profile(token=effective_token)
         except RemoteBackendError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -156,24 +243,33 @@ def start_session(req: StartSessionRequest):
         competency_titles = [str(item.get("title")) for item in ordered_competencies if item.get("title")]
         if not competency_titles:
             raise HTTPException(status_code=400, detail="Remote micro-credential has no competencies")
+        missing_rubrics = missing_locked_rubrics(competency_titles)
+        if missing_rubrics:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Locked rubrics are missing for this micro-credential. Provision them before launch.",
+                    "micro_credential_id": req.micro_credential_id,
+                    "missing_competencies": missing_rubrics,
+                },
+            )
 
-        warnings: list[str] = []
-        remote_access_id = None
-        if effective_token:
-            try:
-                access = remote_backend_client.check_access(
-                    req.micro_credential_id,
-                    token=effective_token,
-                )
-            except RemoteBackendError as exc:
-                raise HTTPException(status_code=502, detail=str(exc)) from exc
-            access_data = access.get("access", {})
-            if access_data.get("can_start_session") is False:
-                raise HTTPException(status_code=403, detail=access_data.get("message") or "Remote backend denied access")
-            enrollment = access_data.get("enrollment") or {}
-            remote_access_id = enrollment.get("id")
-        else:
-            warnings.append("No auth_token provided. Public lesson content is loaded, but enrollment/access and remote session sync will be disabled.")
+        profile_root = profile_payload.get("data") if isinstance(profile_payload.get("data"), dict) else profile_payload
+        profile_id = str(profile_root.get("id") or profile_root.get("user_id") or "").strip()
+        if req.learner_id and profile_id and str(req.learner_id) != profile_id:
+            _log_event(None, req.learner_id, "/session/start", "identity_mismatch", {"provided_learner_id": req.learner_id, "profile_id": profile_id})
+            raise HTTPException(status_code=403, detail="Learner ID does not match the authenticated learner profile.")
+        learner_id = profile_id or req.learner_id
+        if not learner_id:
+            raise HTTPException(status_code=400, detail="Could not determine learner identity from the authenticated profile.")
+
+        access_data = access.get("access", {})
+        can_access = access_data.get("can_access")
+        can_start_session = access_data.get("can_start_session")
+        if can_access is False or can_start_session is False:
+            raise HTTPException(status_code=403, detail=access_data.get("message") or "Remote backend denied access")
+        enrollment = access_data.get("enrollment") or {}
+        remote_access_id = enrollment.get("id")
 
         competency_details = {
             str(item["title"]): {
@@ -187,21 +283,30 @@ def start_session(req: StartSessionRequest):
             if item.get("title")
         }
 
+        upsert_learner(learner_id, profile_payload, verified=True)
         session = create_session(
             topic=str(micro_entry.get("micro_credential") or micro_entry.get("name") or f"MC {req.micro_credential_id}"),
             competencies=competency_titles,
             source="remote",
-            learner_id=req.learner_id,
+            learner_id=learner_id,
             domain_id=req.domain_id,
             remote_micro_credential_id=req.micro_credential_id,
             remote_micro_credential_level=micro_entry.get("level"),
             remote_source=domain_entry.get("source"),
             remote_auth_token=effective_token,
             remote_access_id=remote_access_id if isinstance(remote_access_id, int) else None,
-            backend_warnings=warnings,
+            backend_warnings=[],
             competency_details=competency_details,
+            learner_profile=profile_payload,
+            identity_verified=True,
+            identity_verified_at=str(profile_root.get("verified_at") or profile_root.get("updated_at") or profile_root.get("created_at") or ""),
         )
         intro_message = build_competency_intro(session)
+        _log_event(session.session_id, session.learner_id, "/session/start", "session_started", {
+            "topic": session.topic,
+            "competency_count": len(session.competencies),
+            "identity_verified": True,
+        })
         return {
             "session_id": session.session_id,
             "topic": session.topic,
@@ -216,6 +321,8 @@ def start_session(req: StartSessionRequest):
             "current_competency": session.current_competency,
             "interaction_number": 1,
             "message": intro_message,
+            "identity_verified": session.identity_verified,
+            "gamification": build_gamification_payload(session),
         }
 
     if not req.topic or not req.competencies:
@@ -224,8 +331,11 @@ def start_session(req: StartSessionRequest):
             detail="Provide either topic + competencies, or domain_id + micro_credential_id",
         )
 
-    session = create_session(topic=req.topic, competencies=req.competencies, source="manual", learner_id=req.learner_id)
+    learner_id = req.learner_id or f"manual-{req.topic.lower().replace(' ', '-')[:16]}"
+    upsert_learner(learner_id, {"learner_id": learner_id, "source": "manual"}, verified=False)
+    session = create_session(topic=req.topic, competencies=req.competencies, source="manual", learner_id=learner_id)
     intro_message = build_competency_intro(session)
+    _log_event(session.session_id, session.learner_id, "/session/start", "session_started_manual", {"topic": session.topic, "competency_count": len(session.competencies)})
     return {
         "session_id": session.session_id,
         "topic": session.topic,
@@ -236,6 +346,8 @@ def start_session(req: StartSessionRequest):
         "current_competency": session.current_competency,
         "interaction_number": 1,
         "message": intro_message,
+        "identity_verified": session.identity_verified,
+        "gamification": build_gamification_payload(session),
     }
 
 
@@ -264,6 +376,16 @@ async def pre_assessment_questions(req: PreAssessmentQuestionsRequest):
 def backend_login(req: BackendLoginRequest):
     try:
         payload = remote_backend_client.login(req.email, req.password)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return payload
+
+
+@app.get("/backend/auth/profile/me", summary="Proxy learner profile from the remote backend", tags=["Remote Backend"])
+def backend_profile_me(auth_token: Optional[str] = Query(None)):
+    effective_token = auth_token or remote_backend_client.default_token or None
+    try:
+        payload = remote_backend_client.fetch_profile(token=effective_token)
     except RemoteBackendError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return payload
@@ -304,6 +426,66 @@ def backend_lesson_rubric(competency_id: int):
         raise HTTPException(status_code=404, detail="Remote rubric not found")
     return payload
 
+
+@app.get(
+    "/backend/micro-credential/readiness",
+    summary="Check whether a micro-credential is launch-ready in the AI engine",
+    tags=["Remote Backend"],
+)
+def backend_micro_credential_readiness(
+    domain_id: int = Query(...),
+    micro_credential_id: int = Query(...),
+):
+    try:
+        payload = remote_backend_client.fetch_lesson_competencies(
+            domain_id=domain_id,
+            micro_credential_id=micro_credential_id,
+        )
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    domain_entry, micro_entry = _extract_remote_catalog(payload, domain_id, micro_credential_id)
+    ordered_competencies = sorted(
+        micro_entry.get("competencies", []),
+        key=lambda item: int(item.get("code") or 9999),
+    )
+    competency_titles = [str(item.get("title")) for item in ordered_competencies if item.get("title")]
+    missing = missing_locked_rubrics(competency_titles)
+    provisioned = [title for title in competency_titles if title not in missing]
+    return {
+        "domain_id": domain_id,
+        "micro_credential_id": micro_credential_id,
+        "micro_credential_title": micro_entry.get("micro_credential") or micro_entry.get("name"),
+        "source": domain_entry.get("source"),
+        "total_competencies": len(competency_titles),
+        "launch_ready": len(missing) == 0,
+        "provisioned_competencies": provisioned,
+        "missing_competencies": missing,
+    }
+
+
+@app.post(
+    "/admin/rubrics/register",
+    summary="Register or replace a locked rubric for one competency",
+    tags=["Assessments"],
+)
+def register_locked_rubric(req: LockedRubricRegisterRequest):
+    try:
+        stored = upsert_locked_rubric(
+            req.competency_name,
+            req.rubric_json,
+            version=req.version,
+            display_name=req.display_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "competency_name": req.competency_name,
+        "locked": True,
+        "version": req.version,
+        "rubric": stored,
+    }
+
 @app.post(
     "/pre-assessment/start",
     summary="Generate the first pre-assessment question",
@@ -318,7 +500,9 @@ async def pre_assessment_start(req: StartPreAssessmentRequest):
     """
     session = _get_or_404(req.session_id)
     _require_phase(session, 'pre_assessment')
-    return await handle_pre_assessment_start(session)
+    response = await handle_pre_assessment_start(session)
+    _log_event(session.session_id, session.learner_id, '/pre-assessment/start', 'pre_assessment_started', {'competency': session.current_competency})
+    return response
 
 
 @app.post("/pre-assessment/chat", summary="Submit a pre-assessment answer", tags=["Pre-Assessment"])
@@ -332,7 +516,9 @@ async def pre_assessment_chat(req: PreAssessmentChatRequest):
     """
     session = _get_or_404(req.session_id)
     _require_phase(session, 'pre_assessment')
-    return await handle_pre_assessment(session, req.answer)
+    response = await handle_pre_assessment(session, req.answer)
+    _log_event(session.session_id, session.learner_id, '/pre-assessment/chat', 'pre_assessment_answered', {'competency': session.current_competency, 'level': response.get('level')})
+    return response
 
 
 @app.post("/learn/chat", summary="Send a message in the learning chat", tags=["Learning"])
@@ -351,7 +537,9 @@ async def learn_chat(req: LearnChatRequest):
     """
     session = _get_or_404(req.session_id)
     _require_phase(session, 'learning')
-    return await handle_learning(session, req.text)
+    response = await handle_learning(session, req.text)
+    _log_event(session.session_id, session.learner_id, '/learn/chat', 'learning_turn', {'competency': session.current_competency, 'interaction_number': response.get('interaction_number'), 'phase': response.get('phase')})
+    return response
 
 
 @app.post(
@@ -367,21 +555,84 @@ async def competency_assessment(req: AssessmentSubmitRequest):
     On completion:
     - If more competencies remain -> advances to the next competency intro
     - If the learner fails -> teaching restarts from interaction 3
-    - If the last competency passes -> the session is completed
+    - If the last competency passes -> the session advances to the final assessment
     """
     session = _get_or_404(req.session_id)
     _require_phase(session, 'competency_assessment')
-    return await handle_competency_assessment(session, req.text)
+    response = await handle_competency_assessment(session, req.text)
+    _log_event(session.session_id, session.learner_id, '/assessment/competency', 'competency_assessed', {'competency': response.get('assessed_competency'), 'passed': response.get('passed'), 'score': response.get('score')})
+    return response
 
 
-@app.post("/assessment/final", summary="Submit final assessment answer", tags=["Assessments"])
+@app.post("/assessment/final", summary="Submit final micro-credential assessment answer", tags=["Assessments"])
 async def final_assessment(req: AssessmentSubmitRequest):
     """
-    Legacy endpoint kept for compatibility. The current engine completes the
-    learner journey after the final competency assessment rather than a separate final.
+    Submit the final integrated assessment after all competency assessments pass.
+    Certificate generation is available only after this route moves the session to `completed`.
     """
     session = _get_or_404(req.session_id)
-    return await handle_final_assessment(session, req.text)
+    _require_phase(session, 'final_assessment')
+    response = await handle_final_assessment(session, req.text)
+    _log_event(session.session_id, session.learner_id, '/assessment/final', 'final_assessment_submitted', {'passed': response.get('passed'), 'score': response.get('score')})
+    return response
+
+
+@app.post("/certificate/generate", summary="Generate a learner certificate", tags=["Certificates"], response_model=CertificateViewResponse)
+def generate_certificate(req: CertificateGenerateRequest, request: Request):
+    session = _get_or_404(req.session_id)
+    if session.phase != "completed":
+        raise HTTPException(status_code=400, detail="Certificate can only be generated after the session is completed.")
+    if not session.identity_verified:
+        raise HTTPException(status_code=400, detail="Learner identity must be verified before certificate generation.")
+    anomalies = get_unresolved_anomalies(session.session_id)
+    if any(item.get('severity') == 'critical' for item in anomalies):
+        raise HTTPException(status_code=409, detail="Certificate generation blocked by unresolved critical compliance flags.")
+
+    effective_token = req.auth_token or session.remote_auth_token or remote_backend_client.default_token or None
+    if not effective_token:
+        raise HTTPException(status_code=400, detail="auth_token is required to fetch learner profile details.")
+
+    try:
+        profile_payload = remote_backend_client.fetch_profile(token=effective_token)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    record = issue_certificate(session, profile_payload, _public_base_url(request))
+    _log_event(session.session_id, session.learner_id, '/certificate/generate', 'certificate_generated', {'certificate_id': record.certificate_id})
+    return _certificate_response(record)
+
+
+@app.get("/certificate/verify/{certificate_id}", summary="Verify a generated certificate", tags=["Certificates"], response_model=CertificateViewResponse)
+def verify_certificate(certificate_id: str):
+    record = get_certificate(certificate_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Certificate not found.")
+    return _certificate_response(record, include_html=False)
+
+
+@app.get("/certificate/{certificate_id}/html", summary="Render certificate HTML", tags=["Certificates"], response_class=HTMLResponse)
+def certificate_html(certificate_id: str):
+    record = get_certificate(certificate_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Certificate not found.")
+    return HTMLResponse(render_certificate_html(record))
+
+
+@app.get("/certificate/{certificate_id}/qr.png", summary="Render certificate QR PNG", tags=["Certificates"])
+def certificate_qr(certificate_id: str):
+    record = get_certificate(certificate_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Certificate not found.")
+    return Response(content=render_qr_png(record), media_type="image/png")
+
+
+@app.get("/certificate/{certificate_id}/pdf", summary="Render certificate PDF", tags=["Certificates"])
+def certificate_pdf(certificate_id: str):
+    record = get_certificate(certificate_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Certificate not found.")
+    headers = {"Content-Disposition": f"inline; filename={certificate_id}.pdf"}
+    return Response(content=render_certificate_pdf(record), media_type="application/pdf", headers=headers)
 
 
 @app.get("/session/{session_id}", summary="Get session status", tags=["Sessions"])
@@ -410,6 +661,8 @@ def get_session_status(session_id: str):
         "remote_micro_credential_id": session.remote_micro_credential_id,
         "remote_micro_credential_level": session.remote_micro_credential_level,
         "remote_access_id": session.remote_access_id,
+        "identity_verified": session.identity_verified,
+        "identity_verified_at": session.identity_verified_at,
         "phase": session.phase,
         "user_level": session.user_level,
         "weak_areas": session.weak_areas,
@@ -422,6 +675,8 @@ def get_session_status(session_id: str):
         "final_assessment_unlocked": session.final_assessment_unlocked,
         "current_assessment_attempts": session.current_assessment_attempts,
         "current_assessment_prompt": session.current_assessment_prompt,
+        "final_assessment_prompt": session.final_assessment_prompt,
+        "final_assessment_attempts": session.final_assessment_attempts,
         "personalization_state": session.personalization_state,
         "current_competency": session.current_competency,
         "current_remote_competency_id": session.current_remote_competency_id,
@@ -441,6 +696,10 @@ def get_session_status(session_id: str):
         "backend_warnings": session.backend_warnings,
         "competency_details": session.competency_details.get(session.current_competency, {}),
         "gamification_progress": gamification,
+        "gamification": build_gamification_payload(session),
+        "earned_badges": list_badges(session.session_id),
+        "anomaly_flags": get_unresolved_anomalies(session.session_id),
+        "session_summary": session.session_summary,
         "completed_competencies": [
             {"competency": r.competency, "score": r.score, "passed": r.passed}
             for r in session.completed_competencies

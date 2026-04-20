@@ -1,22 +1,24 @@
-from typing import Dict, List, Optional
-from app.state import LearnerSession
+﻿from typing import List, Optional
 
-_sessions: Dict[str, LearnerSession] = {}
+from app.persistence import create_session_record, delete_session_record, get_session_record, save_session_record
+from app.state import LearnerSession
 
 
 def create_session(topic: str, competencies: List[str], **kwargs) -> LearnerSession:
     session = LearnerSession(topic=topic, competencies=competencies, **kwargs)
-    _sessions[session.session_id] = session
+    if session.current_competency not in session.competency_attempts:
+        session.competency_attempts[session.current_competency] = 1
+    create_session_record(session)
     return session
 
 
 def get_session(session_id: str) -> Optional[LearnerSession]:
-    return _sessions.get(session_id)
+    return get_session_record(session_id)
 
 
 def save_session(session: LearnerSession):
-    _sessions[session.session_id] = session
+    save_session_record(session)
 
 
 def delete_session(session_id: str):
-    _sessions.pop(session_id, None)
+    delete_session_record(session_id)

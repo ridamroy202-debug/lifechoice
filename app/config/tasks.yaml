@@ -230,12 +230,13 @@ assessment_eval_task:
 
     Rules:
     - Score rigorously against the rubric only
-    - Use the rubric weights when calculating the overall percent
+    - Each rubric criterion is binary: met or not met
+    - Use rubric weights only after converting each criterion to met/not met
     - The pass threshold is 75.0
     - Return JSON only
 
     Required JSON keys:
-    - criteria_scores: list
+    - criteria_scores: list of {criterion_id, met, evidence}
     - overall_percent: float
     - pass: bool
     - summary: string
@@ -274,7 +275,7 @@ final_assessment_task:
     - Practical application: Can they apply knowledge to real scenarios?
     - Critical thinking: Do they show analysis beyond surface understanding?
 
-    Pass threshold: overall_percent >= 70.0
+    Pass threshold: overall_percent >= 75.0
     Respond ONLY with valid JSON. No extra text.
   expected_output: >
     A valid JSON object with keys: "criteria_scores" (list), "overall_percent" (float),

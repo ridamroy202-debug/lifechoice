@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import urljoin
 
 import requests
 from requests import RequestException
@@ -17,7 +18,7 @@ class RemoteBackendError(RuntimeError):
 
 class RemoteBackendClient:
     def __init__(self) -> None:
-        self.base_url = os.getenv("REMOTE_BACKEND_URL", "http://3.111.49.240:8005").rstrip("/")
+        self.base_url = os.getenv("REMOTE_BACKEND_URL", "https://lifechoice.duckdns.org").rstrip("/")
         self.default_token = os.getenv("REMOTE_API_TOKEN", "").strip()
 
     def _headers(self, token: str | None = None) -> dict[str, str]:
@@ -67,6 +68,15 @@ class RemoteBackendClient:
             data={"email": email, "password": password},
         )
 
+    def fetch_profile(self, *, token: str | None) -> dict[str, Any]:
+        if not (token or self.default_token):
+            raise RemoteBackendError("Remote backend auth token is required to fetch learner profile")
+        return self._request(
+            "GET",
+            "/auth/profile/me/",
+            token=token,
+        )
+
     def fetch_lesson_competencies(
         self,
         *,
@@ -95,14 +105,13 @@ class RemoteBackendClient:
             raise RemoteBackendError("Remote backend auth token is required to check enrollment access")
         return self._request(
             "GET",
-            f"/enrollment/test/has-access/{micro_credential_id}/",
+            f"/enrollment/enrollments/check-access/{micro_credential_id}/",
             token=token,
         )
 
     def start_learning_session(
         self,
         *,
-        mc_access_id: int,
         competency_id: int,
         token: str | None,
     ) -> dict[str, Any]:
@@ -112,7 +121,7 @@ class RemoteBackendClient:
             "POST",
             "/learning/sessions/start/",
             token=token,
-            json_body={"mc_access_id": mc_access_id, "competency_id": competency_id},
+            json_body={"competency_id": competency_id},
         )
 
     def record_interaction(
@@ -169,6 +178,9 @@ class RemoteBackendClient:
 
     def fetch_gamification_progress(self, session_id: int, *, token: str | None) -> dict[str, Any]:
         return self._request("GET", f"/gamification/progress/{session_id}/", token=token)
+
+    def absolute_url(self, path: str) -> str:
+        return urljoin(f"{self.base_url}/", path.lstrip("/"))
 
 
 remote_backend_client = RemoteBackendClient()

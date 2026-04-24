@@ -1,6 +1,8 @@
 from crewai import Agent, Crew, Task, Process, LLM
 from crewai.project import CrewBase, agent, task, crew
 
+from app.settings import settings
+
 @CrewBase
 class PathPlnner():
     '''Adaptive learning path planner for 22-step arcs'''
@@ -12,7 +14,7 @@ class PathPlnner():
     def path_agent(self) -> Agent:
         return Agent(
             config=self.agents_config['learning_path_planner_agent'],
-            llm=LLM(model='gpt-4o-mini', temperature=0.5),
+            llm=LLM(model=settings.openai_default_model, temperature=0.5),
             verbose=False,
         )
 

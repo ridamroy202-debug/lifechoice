@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 from urllib.parse import urljoin
 
 import requests
 from requests import RequestException
-from dotenv import load_dotenv
 
-
-load_dotenv()
+from app.settings import settings
 
 
 class RemoteBackendError(RuntimeError):
@@ -18,8 +15,8 @@ class RemoteBackendError(RuntimeError):
 
 class RemoteBackendClient:
     def __init__(self) -> None:
-        self.base_url = os.getenv("REMOTE_BACKEND_URL", "https://lifechoice.duckdns.org").rstrip("/")
-        self.default_token = os.getenv("REMOTE_API_TOKEN", "").strip()
+        self.base_url = settings.remote_backend_url
+        self.default_token = settings.remote_api_token
 
     def _headers(self, token: str | None = None) -> dict[str, str]:
         headers = {"Accept": "application/json"}

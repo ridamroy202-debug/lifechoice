@@ -1,14 +1,11 @@
 ﻿from __future__ import annotations
 
-import os
 import sqlite3
 from pathlib import Path
 
-from dotenv import load_dotenv
+from app.settings import settings
 
-load_dotenv()
-
-_DB_PATH = Path(os.getenv("AI_ENGINE_DB_PATH", Path(__file__).resolve().parent.parent / "data" / "ai_engine.db"))
+_DB_PATH = Path(settings.ai_engine_db_path)
 
 
 def db_path() -> Path:

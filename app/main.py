@@ -1,5 +1,3 @@
-import os
-
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 from typing import Any, List, Optional
@@ -33,6 +31,7 @@ from app.persistence import (
 )
 from app.policy import build_gamification_payload, build_session_runtime_payload
 from app.remote_backend import RemoteBackendError, remote_backend_client
+from app.settings import configure_logging, settings
 
 openapi_tags = [
     {
@@ -67,6 +66,8 @@ app = FastAPI(
     description="AI teaching engine connected to the remote LifeChoice backend for lesson context, rubrics, enrollment access, and learning session sync.",
     openapi_tags=openapi_tags,
 )
+
+configure_logging()
 
 
 @app.on_event("startup")
@@ -233,7 +234,7 @@ def _certificate_response(record, include_html: bool = True) -> CertificateViewR
 
 
 def _require_rubric_admin_key(provided_key: Optional[str]) -> None:
-    expected_key = os.getenv("RUBRIC_ADMIN_KEY", "").strip()
+    expected_key = settings.rubric_admin_key
     if not expected_key:
         raise HTTPException(status_code=503, detail="Rubric administration is disabled until RUBRIC_ADMIN_KEY is configured.")
     if provided_key != expected_key:

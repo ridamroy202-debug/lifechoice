@@ -1,6 +1,8 @@
 from crewai import Agent, Crew, Task, Process, LLM
 from crewai.project import CrewBase, crew, agent, task
 
+from app.settings import settings
+
 @CrewBase
 class AssessmentCrew():
     '''Rubric-based assessment evaluator powered by Claude Sonnet'''
@@ -12,7 +14,7 @@ class AssessmentCrew():
     def evaluator(self) -> Agent:
         return Agent(
             config=self.agents_config['assessment_evaluator_agent'],
-            llm=LLM(model='claude-sonnet-4-20250514', temperature=0.2),
+            llm=LLM(model=settings.anthropic_model, temperature=0.2),
             verbose=False,
         )
 

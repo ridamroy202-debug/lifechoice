@@ -1,6 +1,8 @@
 from crewai import Agent, Crew, Process, Task, LLM
 from crewai.project import CrewBase, agent, crew, task
 
+from app.settings import settings
+
 
 @CrewBase
 class PreAssessCrew():
@@ -13,7 +15,7 @@ class PreAssessCrew():
     def materials(self) -> Agent:
         return Agent(
             config=self.agents_config['diagonistic_agent'],
-            llm=LLM(model='gpt-4o-mini', temperature=0.5),
+            llm=LLM(model=settings.openai_default_model, temperature=0.5),
             verbose=False,
         )
 

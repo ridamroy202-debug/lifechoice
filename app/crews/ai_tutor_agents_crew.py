@@ -1,6 +1,8 @@
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai.project import CrewBase, crew, agent, task
 
+from app.settings import settings
+
 @CrewBase
 class TutorCrew():
     '''Personalized Tutor Crew — delivers production-grade teaching content'''
@@ -12,7 +14,7 @@ class TutorCrew():
     def tutor(self) -> Agent:
         return Agent(
             config=self.agents_config['personal_ai_tutor_agent'],
-            llm=LLM(model='gpt-4o', temperature=0.5, max_tokens=4096),
+            llm=LLM(model=settings.openai_complex_model, temperature=0.5, max_tokens=4096),
             verbose=False,
             max_iter=3,
         )

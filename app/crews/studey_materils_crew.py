@@ -1,6 +1,8 @@
 from crewai import Agent, Crew, Process, Task, LLM
 from crewai.project import CrewBase, agent, crew, task
 
+from app.settings import settings
+
 @CrewBase
 class StudyMeterial():
     '''Professional study material generator for micro-credentials'''
@@ -12,7 +14,7 @@ class StudyMeterial():
     def materials(self) -> Agent:
         return Agent(
             config=self.agents_config['senario_content_generator_agent'],
-            llm=LLM(model='gpt-4o', temperature=0.3, max_tokens=8192),
+            llm=LLM(model=settings.openai_complex_model, temperature=0.3, max_tokens=8192),
             verbose=False,
         )
 

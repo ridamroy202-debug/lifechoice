@@ -1,6 +1,8 @@
 from crewai import Agent, Crew, Task, Process, LLM
 from crewai.project import CrewBase, agent, task, crew
 
+from app.settings import settings
+
 @CrewBase
 class LevelClassifierCrew():
     '''Classifies learner level from pre-assessment responses'''
@@ -11,7 +13,7 @@ class LevelClassifierCrew():
     def classifier(self) -> Agent:
         return Agent(
             config=self.agents_config['level_classifier_agent'],
-            llm=LLM(model='gpt-4o-mini'),
+            llm=LLM(model=settings.openai_default_model),
             verbose=False
         )
 

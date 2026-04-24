@@ -1,4 +1,6 @@
-from fastapi import FastAPI, HTTPException, Query, Request
+import os
+
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 from typing import Any, List, Optional
 from app.session_manager import create_session, get_session
@@ -29,7 +31,7 @@ from app.persistence import (
     upsert_learner,
     upsert_locked_rubric,
 )
-from app.policy import build_gamification_payload
+from app.policy import build_gamification_payload, build_session_runtime_payload
 from app.remote_backend import RemoteBackendError, remote_backend_client
 
 openapi_tags = [
@@ -140,6 +142,28 @@ class CertificateGenerateRequest(BaseModel):
     auth_token: Optional[str] = None
 
 
+class BackendLearningSessionStartRequest(BaseModel):
+    competency_id: int
+    auth_token: Optional[str] = None
+
+
+class BackendLearningInteractionRequest(BaseModel):
+    interaction_type: str = "teaching"
+    ai_prompt: str
+    ai_response: str
+    learner_input: Optional[str] = None
+    formative_passed: Optional[bool] = None
+    auth_token: Optional[str] = None
+
+
+class BackendLearningAssessmentRequest(BaseModel):
+    scenario_question: str
+    learner_response: str
+    rubric_score: float
+    ai_feedback: str
+    auth_token: Optional[str] = None
+
+
 class LockedRubricRegisterRequest(BaseModel):
     competency_name: str
     rubric_json: dict[str, Any]
@@ -206,6 +230,14 @@ def _certificate_response(record, include_html: bool = True) -> CertificateViewR
         competencies=record.competencies,
         certificate_html=render_certificate_html(record) if include_html else None,
     )
+
+
+def _require_rubric_admin_key(provided_key: Optional[str]) -> None:
+    expected_key = os.getenv("RUBRIC_ADMIN_KEY", "").strip()
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="Rubric administration is disabled until RUBRIC_ADMIN_KEY is configured.")
+    if provided_key != expected_key:
+        raise HTTPException(status_code=403, detail="Invalid rubric administration key.")
 
 
 # ── Routes ────────────────────────────────────────────────────────────────
@@ -323,6 +355,7 @@ def start_session(req: StartSessionRequest):
             "message": intro_message,
             "identity_verified": session.identity_verified,
             "gamification": build_gamification_payload(session),
+            **build_session_runtime_payload(session),
         }
 
     if not req.topic or not req.competencies:
@@ -348,6 +381,7 @@ def start_session(req: StartSessionRequest):
         "message": intro_message,
         "identity_verified": session.identity_verified,
         "gamification": build_gamification_payload(session),
+        **build_session_runtime_payload(session),
     }
 
 
@@ -414,16 +448,118 @@ def backend_lesson_competencies(
 
 @app.get(
     "/backend/lesson/rubric/{competency_id}",
-    summary="Proxy rubric from the remote backend",
+    summary="Remote rubric proxy is currently unsupported",
     tags=["Remote Backend"],
 )
 def backend_lesson_rubric(competency_id: int):
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Remote rubric lookup is disabled because the live LifeChoice backend Swagger schema "
+            "does not currently expose a rubric-by-competency route."
+        ),
+    )
+
+
+@app.get(
+    "/backend/enrollment/check-access/{mc_id}",
+    summary="Proxy enrollment access check from the remote backend",
+    tags=["Remote Backend"],
+)
+def backend_enrollment_check_access(mc_id: int, auth_token: Optional[str] = Query(None)):
+    effective_token = auth_token or remote_backend_client.default_token or None
     try:
-        payload = remote_backend_client.fetch_rubric(competency_id)
+        payload = remote_backend_client.check_access(mc_id, token=effective_token)
     except RemoteBackendError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    if not payload:
-        raise HTTPException(status_code=404, detail="Remote rubric not found")
+    return payload
+
+
+@app.post(
+    "/backend/learning/sessions/start",
+    summary="Start a remote learning session",
+    tags=["Remote Backend"],
+)
+def backend_learning_session_start(req: BackendLearningSessionStartRequest):
+    effective_token = req.auth_token or remote_backend_client.default_token or None
+    try:
+        payload = remote_backend_client.start_learning_session(
+            competency_id=req.competency_id,
+            token=effective_token,
+        )
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return payload
+
+
+@app.get(
+    "/backend/learning/sessions/{session_id}",
+    summary="Get a remote learning session",
+    tags=["Remote Backend"],
+)
+def backend_learning_session_detail(session_id: int, auth_token: Optional[str] = Query(None)):
+    effective_token = auth_token or remote_backend_client.default_token or None
+    try:
+        payload = remote_backend_client.fetch_learning_session(session_id, token=effective_token)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return payload
+
+
+@app.post(
+    "/backend/learning/sessions/{session_id}/interact",
+    summary="Record a remote learning interaction",
+    tags=["Remote Backend"],
+)
+def backend_learning_session_interact(session_id: int, req: BackendLearningInteractionRequest):
+    effective_token = req.auth_token or remote_backend_client.default_token or None
+    try:
+        payload = remote_backend_client.record_interaction(
+            session_id=session_id,
+            interaction_type=req.interaction_type,
+            ai_prompt=req.ai_prompt,
+            ai_response=req.ai_response,
+            learner_input=req.learner_input,
+            formative_passed=req.formative_passed,
+            token=effective_token,
+        )
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return payload
+
+
+@app.post(
+    "/backend/learning/sessions/{session_id}/assess",
+    summary="Submit a remote learning assessment",
+    tags=["Remote Backend"],
+)
+def backend_learning_session_assess(session_id: int, req: BackendLearningAssessmentRequest):
+    effective_token = req.auth_token or remote_backend_client.default_token or None
+    try:
+        payload = remote_backend_client.submit_assessment(
+            session_id=session_id,
+            scenario_question=req.scenario_question,
+            learner_response=req.learner_response,
+            rubric_score=req.rubric_score,
+            ai_feedback=req.ai_feedback,
+            token=effective_token,
+        )
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return payload
+
+
+@app.get(
+    "/backend/gamification/progress/{session_id}",
+    summary="Get remote gamification progress",
+    tags=["Remote Backend"],
+)
+def backend_gamification_progress(session_id: int, auth_token: Optional[str] = Query(None)):
+    effective_token = auth_token or remote_backend_client.default_token or None
+    try:
+        payload = remote_backend_client.fetch_gamification_progress(session_id, token=effective_token)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     return payload
 
 
@@ -469,7 +605,8 @@ def backend_micro_credential_readiness(
     summary="Register or replace a locked rubric for one competency",
     tags=["Assessments"],
 )
-def register_locked_rubric(req: LockedRubricRegisterRequest):
+def register_locked_rubric(req: LockedRubricRegisterRequest, x_rubric_admin_key: Optional[str] = Header(None)):
+    _require_rubric_admin_key(x_rubric_admin_key)
     try:
         stored = upsert_locked_rubric(
             req.competency_name,
@@ -663,10 +800,16 @@ def get_session_status(session_id: str):
         "remote_access_id": session.remote_access_id,
         "identity_verified": session.identity_verified,
         "identity_verified_at": session.identity_verified_at,
+        "remote_sync": session.remote_sync_status,
+        "remote_last_event_at": session.remote_last_event_at,
         "phase": session.phase,
         "user_level": session.user_level,
         "weak_areas": session.weak_areas,
         "interaction_number": session.competency_interaction,
+        "interaction_type": session.current_interaction_type,
+        "delivery_format": session.current_delivery_format,
+        "formative_slot": session.formative_slot_number,
+        "required_next_action": session.required_next_action,
         "pre_assessment_completed": session.pre_assessment_completed,
         "current_difficulty": session.current_difficulty,
         "formative_check_results": session.formative_check_results,
@@ -695,6 +838,9 @@ def get_session_status(session_id: str):
         "is_doubt_phase": session.is_doubt_phase,
         "backend_warnings": session.backend_warnings,
         "competency_details": session.competency_details.get(session.current_competency, {}),
+        "delivery_format_history": session.delivery_format_history,
+        "concept_history": session.concept_history,
+        "completion_badge": session.completion_badge,
         "gamification_progress": gamification,
         "gamification": build_gamification_payload(session),
         "earned_badges": list_badges(session.session_id),
@@ -706,5 +852,3 @@ def get_session_status(session_id: str):
         ],
         "message_count": len(session.messages),
     }
-
-

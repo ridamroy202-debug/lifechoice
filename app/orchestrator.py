@@ -1,4 +1,3 @@
-
 import json
 import os
 import re
@@ -13,15 +12,23 @@ from app.crews.level_classifier_crew import LevelClassifierCrew
 from app.crews.pre_assessment_crew import PreAssessCrew
 from app.crews.studey_materils_crew import StudyMeterial
 from app.persistence import (
+    append_event_log,
     create_badge,
     get_locked_rubric,
+    get_rubric_source_hash,
     get_rubric_version,
     record_competency_attempt,
     record_final_assessment,
     record_formative_check,
     utc_now_iso,
 )
-from app.policy import build_gamification_payload, build_session_summary, detect_and_record_anomalies, encouragement_message
+from app.policy import (
+    build_gamification_payload,
+    build_session_runtime_payload,
+    build_session_summary,
+    detect_and_record_anomalies,
+    encouragement_message,
+)
 from app.remote_backend import RemoteBackendError, remote_backend_client
 from app.session_manager import save_session
 from app.state import CompetencyResult, LearnerSession
@@ -29,6 +36,8 @@ from app.state import CompetencyResult, LearnerSession
 PASS_THRESHOLD = 75.0
 PRE_ASSESSMENT_QUESTION_COUNT = 2
 BASE_LEARNING_INTERACTIONS = 6
+REVISION_INTERACTIONS = 2
+EASY_PASS_THRESHOLD = 90.0
 
 _RUBRICS_CACHE: dict[str, Any] | None = None
 
@@ -134,29 +143,108 @@ def _three_word_competency_brief(competency: str) -> str:
     return " ".join(word.title() for word in brief_words[:3])
 
 
+def _log_session_event(session: LearnerSession, route: str, event_type: str, payload: dict[str, Any]) -> None:
+    append_event_log(session.session_id, session.learner_id, route, event_type, payload)
+
+
+def _record_session_interaction(
+    session: LearnerSession,
+    *,
+    interaction_type: str,
+    interaction_number: int,
+    delivery_format: str | None = None,
+    concept: str | None = None,
+) -> None:
+    concept_name = concept or session.current_subpart or session.current_competency
+    session.record_interaction_event(
+        interaction_type=interaction_type,  # type: ignore[arg-type]
+        concept=concept_name,
+        delivery_format=delivery_format,
+        interaction_number=interaction_number,
+        phase=session.phase,
+    )
+    _log_session_event(
+        session,
+        "/interaction",
+        "interaction_recorded",
+        {
+            "interaction_number": interaction_number,
+            "interaction_type": interaction_type,
+            "delivery_format": delivery_format,
+            "concept": concept_name,
+            "phase": session.phase,
+        },
+    )
+
+
+def _sync_prompt_with_metadata(session: LearnerSession, ai_prompt: str, interaction_type: str) -> str:
+    payload = {
+        "interaction_type": interaction_type,
+        "gamification": build_gamification_payload(session),
+        "required_next_action": session.required_next_action,
+    }
+    return f"{ai_prompt}\n\n[AI_ENGINE_SYNC]{json.dumps(payload, sort_keys=True)}"
+
+
+def _set_remote_sync_success(session: LearnerSession, remote_session_id: int | None) -> None:
+    session.set_remote_sync(outcome="synced", backend_session_id=remote_session_id)
+    _log_session_event(
+        session,
+        "/remote-sync",
+        "remote_sync_succeeded",
+        {
+            "backend_session_id": remote_session_id,
+            "last_sync_at": session.remote_sync_status.get("last_sync_at"),
+        },
+    )
+
+
+def _set_remote_sync_failure(session: LearnerSession, warning: str, remote_session_id: int | None = None) -> None:
+    if warning not in session.backend_warnings:
+        session.backend_warnings.append(warning)
+    session.set_remote_sync(outcome="warning", backend_session_id=remote_session_id, warning=warning)
+    _log_session_event(
+        session,
+        "/remote-sync",
+        "remote_sync_failed",
+        {
+            "backend_session_id": remote_session_id,
+            "warning": warning,
+        },
+    )
+
+
+def _enforce_question_count(text: str, max_questions: int = PRE_ASSESSMENT_QUESTION_COUNT) -> str:
+    questions = [part.strip() for part in re.findall(r"[^?]*\?", text, flags=re.MULTILINE) if part.strip()]
+    selected = questions[:max_questions]
+    if not selected:
+        selected = [
+            "In a real scenario, what would you do first and why?",
+            "What result would tell you the approach is working?",
+        ][:max_questions]
+    return "\n".join(f"{idx}. {item}" for idx, item in enumerate(selected, start=1))
+
+
+def _runtime_fields(session: LearnerSession) -> dict[str, Any]:
+    return build_session_runtime_payload(session)
+
+
 def build_competency_intro(session: LearnerSession) -> str:
     competency = session.current_competency
     details = _get_competency_details(session, competency)
-    description = str(details.get("description") or "").strip()
+    description = str(details.get("description") or "").strip().replace(".", ";")
     brief = _three_word_competency_brief(competency)
-
-    lines = [
-        f"**{brief}**",
-        "",
-        f"We are starting the competency **{competency}**.",
-    ]
-    if description:
-        lines.append(f"This competency focuses on: {description}")
-    lines.extend(
-        [
-            "In this competency session, I will teach one concept at a time, check mastery in short formative moments, and unlock the final applied assessment only after you show readiness.",
-            "Next step: call `POST /pre-assessment/start` for the competency pre-assessment.",
-        ]
+    description_text = f" {description}" if description else ""
+    intro_message = (
+        f"**{brief}**\n\n"
+        f"We are starting **{competency}**.{description_text} "
+        "I will teach one concept at a time and check your understanding as we go. "
+        "Start the diagnostic when you are ready."
     )
-    intro_message = "\n".join(lines)
     session.intro_delivered = True
     session.competency_interaction = 1
     session.add_message("assistant", intro_message)
+    _record_session_interaction(session, interaction_type="intro", interaction_number=1, concept=competency)
     save_session(session)
     return intro_message
 
@@ -209,6 +297,7 @@ def _load_assessment_context(session: LearnerSession, competency: str) -> tuple[
     if not locked:
         raise RuntimeError(f"Locked rubric missing for competency '{competency}'. Provision it in the database before assessment.")
 
+    locked["source_hash"] = get_rubric_source_hash(competency)
     session.rubric_cache[competency] = locked
     scenario = locked.get("scenario_template") or details.get("description") or session.study_materials.get(competency, "")
     return locked, str(scenario), "db_locked"
@@ -217,6 +306,7 @@ def _load_assessment_context(session: LearnerSession, competency: str) -> tuple[
 def _ensure_remote_learning_session(session: LearnerSession, competency: str) -> int | None:
     existing = session.remote_learning_sessions.get(competency)
     if existing:
+        _set_remote_sync_success(session, existing)
         return existing
 
     details = _get_competency_details(session, competency)
@@ -231,14 +321,15 @@ def _ensure_remote_learning_session(session: LearnerSession, competency: str) ->
         )
     except RemoteBackendError as exc:
         warning = f"Could not start remote learning session for '{competency}': {exc}"
-        if warning not in session.backend_warnings:
-            session.backend_warnings.append(warning)
+        _set_remote_sync_failure(session, warning)
         return None
 
     remote_session_id = payload.get("id")
     if isinstance(remote_session_id, int):
         session.remote_learning_sessions[competency] = remote_session_id
+        _set_remote_sync_success(session, remote_session_id)
         return remote_session_id
+    _set_remote_sync_failure(session, f"Remote learning session for '{competency}' did not return an integer id.")
     return None
 
 
@@ -320,8 +411,11 @@ def _delivery_mode(session: LearnerSession) -> str:
         "mini_challenge",
         "error_clinic",
     ]
-    index = len(session.delivery_history) % len(modes)
-    return modes[index]
+    index = len(session.delivery_format_history) % len(modes)
+    candidate = modes[index]
+    if session.delivery_format_history and candidate == session.delivery_format_history[-1]:
+        candidate = modes[(index + 1) % len(modes)]
+    return candidate
 
 
 def _build_personalization_state(session: LearnerSession) -> dict[str, str]:
@@ -336,8 +430,6 @@ def _build_personalization_state(session: LearnerSession) -> dict[str, str]:
         "spaced_learning_rule": "one concept per interaction",
     }
     session.personalization_state = state
-    session.delivery_history.append(delivery_mode)
-    session.last_delivery_format = delivery_mode
     return state
 
 
@@ -390,7 +482,7 @@ def _generate_preassessment_prompt(session: LearnerSession) -> str:
             "turn_number": 1,
         }
     )
-    return result.raw.strip()
+    return _enforce_question_count(result.raw.strip())
 
 
 def _classify_competency_readiness(session: LearnerSession) -> dict[str, Any]:
@@ -425,25 +517,35 @@ def _all_formative_slots_passed(session: LearnerSession) -> bool:
     return bool(session.formative_slots) and all(item is True for item in session.formative_slots)
 
 
-def _apply_formative_outcome(session: LearnerSession, passed: bool, percent: float, summary: str) -> str:
+def _apply_formative_outcome(session: LearnerSession, passed: bool, percent: float, summary: str, *, easy_pass: bool) -> str:
     _update_formative_slot(session, passed)
     points_delta = session.award_points_for_formative(passed)
-    session.formative_feedback_log.append({"passed": passed, "score": percent, "summary": summary, "points_delta": points_delta})
+    session.formative_feedback_log.append(
+        {
+            "passed": passed,
+            "score": percent,
+            "summary": summary,
+            "points_delta": points_delta,
+            "easy_pass": easy_pass,
+        }
+    )
     session.awaiting_formative_response = False
     session.current_formative_prompt = None
 
     if passed:
         session.consecutive_formative_passes += 1
         session.consecutive_formative_fails = 0
-        if session.consecutive_formative_passes >= 2:
+        session.consecutive_easy_passes = session.consecutive_easy_passes + 1 if easy_pass else 0
+        if session.consecutive_easy_passes >= 2:
             session.current_difficulty = _raise_difficulty(session.current_difficulty)
         if session.current_subpart_index < len(session.competency_subparts.get(session.current_competency, [])) - 1:
             session.current_subpart_index += 1
     else:
         session.consecutive_formative_passes = 0
+        session.consecutive_easy_passes = 0
         session.consecutive_formative_fails += 1
         session.current_difficulty = _lower_difficulty(session.current_difficulty)
-        if session.consecutive_formative_fails >= 2 or sum(item is False for item in session.formative_slots) >= 2:
+        if sum(item is False for item in session.formative_slots) >= 2:
             session.revision_required = True
 
     if session.learning_turn >= BASE_LEARNING_INTERACTIONS and _all_formative_slots_passed(session):
@@ -480,7 +582,7 @@ def _build_formative_rubric(session: LearnerSession) -> dict[str, Any]:
     }
 
 
-def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -> tuple[bool, float, str]:
+def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -> tuple[bool, float, str, bool]:
     rubric = _build_formative_rubric(session)
     result = AssessmentCrew().crew().kickoff(
         inputs={
@@ -495,7 +597,7 @@ def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -
     overall = float(normalized.get("overall_percent", 0.0) or 0.0)
     passed = bool(normalized.get("pass", overall >= PASS_THRESHOLD))
     summary = str(normalized.get("summary") or "").strip() or "No detailed formative feedback was returned."
-    return passed, overall, summary
+    return passed, overall, summary, overall >= EASY_PASS_THRESHOLD
 
 
 def _should_ask_formative_check(session: LearnerSession) -> bool:
@@ -597,6 +699,8 @@ def _record_remote_teaching_interaction(
     ai_response: str,
     learner_input: str | None,
     formative_passed: bool | None,
+    *,
+    interaction_type: str,
 ):
     remote_learning_session_id = _ensure_remote_learning_session(session, competency)
     if not remote_learning_session_id:
@@ -605,8 +709,8 @@ def _record_remote_teaching_interaction(
     try:
         remote_backend_client.record_interaction(
             session_id=remote_learning_session_id,
-            interaction_type="teaching",
-            ai_prompt=ai_prompt,
+            interaction_type=interaction_type,
+            ai_prompt=_sync_prompt_with_metadata(session, ai_prompt, interaction_type),
             ai_response=ai_response,
             learner_input=learner_input,
             formative_passed=formative_passed,
@@ -614,11 +718,12 @@ def _record_remote_teaching_interaction(
         )
     except RemoteBackendError as exc:
         warning = f"Remote interaction sync failed for '{competency}': {exc}"
-        if warning not in session.backend_warnings:
-            session.backend_warnings.append(warning)
+        _set_remote_sync_failure(session, warning, remote_learning_session_id)
+        return
+    _set_remote_sync_success(session, remote_learning_session_id)
 
 
-def _generate_learning_response(session: LearnerSession, user_message: str, formative_feedback: str = "") -> str:
+def _generate_learning_response(session: LearnerSession, user_message: str, formative_feedback: str = "") -> tuple[str, str]:
     competency = session.current_competency
     competency_label = _competency_prompt_label(session, competency)
     current_subpart = session.current_subpart or competency
@@ -654,6 +759,7 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
     )
     ai_response = result.raw.strip()
     session.add_message("assistant", ai_response)
+    interaction_type = "revision" if session.revision_required and session.learning_turn > BASE_LEARNING_INTERACTIONS else "teach"
 
     if include_formative:
         session.awaiting_formative_response = True
@@ -666,8 +772,17 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
             session.current_formative_slot = len(session.formative_slots)
             session.formative_slots.append(None)
         session.current_formative_prompt = _parse_formative_prompt(ai_response)
+        if interaction_type != "revision":
+            interaction_type = "formative"
 
-    return ai_response
+    _record_session_interaction(
+        session,
+        interaction_type=interaction_type,
+        interaction_number=session.competency_interaction,
+        delivery_format=personalization["delivery_mode"],
+        concept=current_subpart,
+    )
+    return ai_response, interaction_type
 
 
 def _reset_learning_after_assessment_fail(session: LearnerSession):
@@ -684,6 +799,7 @@ def _reset_learning_after_assessment_fail(session: LearnerSession):
     session.revision_turns_used = 0
     session.consecutive_formative_passes = 0
     session.consecutive_formative_fails = 0
+    session.consecutive_easy_passes = 0
     session.current_difficulty = _difficulty_from_level(session.user_level)
     session.final_assessment_unlocked = False
     session.current_assessment_prompt = None
@@ -700,6 +816,7 @@ async def handle_pre_assessment_start(session: LearnerSession) -> dict[str, Any]
             "interaction_number": 2,
             "message": session.pre_assessment_prompt,
             "already_started": True,
+            **_runtime_fields(session),
         }
 
     prompt = _generate_preassessment_prompt(session)
@@ -707,6 +824,7 @@ async def handle_pre_assessment_start(session: LearnerSession) -> dict[str, Any]
     session.pre_assessment_turn = 1
     session.competency_interaction = max(session.competency_interaction, 2)
     session.add_message("assistant", prompt)
+    _record_session_interaction(session, interaction_type="diagnostic", interaction_number=2, concept=session.current_competency)
     save_session(session)
     return {
         "session_id": session.session_id,
@@ -715,6 +833,7 @@ async def handle_pre_assessment_start(session: LearnerSession) -> dict[str, Any]
         "competency": session.current_competency,
         "message": prompt,
         "question_count": PRE_ASSESSMENT_QUESTION_COUNT,
+        **_runtime_fields(session),
     }
 
 
@@ -740,7 +859,7 @@ async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> di
 
     session.learning_turn = 1
     session.competency_interaction = 3
-    teaching_response = _generate_learning_response(
+    teaching_response, interaction_type = _generate_learning_response(
         session,
         user_message=f"Learner pre-assessment answer: {user_answer}",
         formative_feedback="Use the pre-assessment answer to personalize the first teaching interaction.",
@@ -752,6 +871,7 @@ async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> di
         ai_response=teaching_response,
         learner_input=user_answer,
         formative_passed=None,
+        interaction_type="teaching" if interaction_type == "teach" else "formative_check",
     )
 
     save_session(session)
@@ -773,11 +893,13 @@ async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> di
         "personalization_state": session.personalization_state,
         "gamification": build_gamification_payload(session),
         "anomaly_flags": anomalies,
+        **_runtime_fields(session),
     }
 
 
 def _learning_window_exhausted(session: LearnerSession) -> bool:
-    return session.learning_turn >= session.max_learning_window
+    limit = session.max_learning_turns + REVISION_INTERACTIONS if session.revision_required else session.max_learning_turns
+    return session.learning_turn >= limit
 
 
 async def handle_learning(session: LearnerSession, user_message: str) -> dict[str, Any]:
@@ -788,8 +910,14 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
     formative_passed: bool | None = None
 
     if session.awaiting_formative_response:
-        formative_passed, formative_percent, formative_summary = _evaluate_formative_response(session, user_message)
-        formative_feedback = _apply_formative_outcome(session, formative_passed, formative_percent, formative_summary)
+        formative_passed, formative_percent, formative_summary, easy_pass = _evaluate_formative_response(session, user_message)
+        formative_feedback = _apply_formative_outcome(
+            session,
+            formative_passed,
+            formative_percent,
+            formative_summary,
+            easy_pass=easy_pass,
+        )
         record_formative_check(
             session.session_id,
             competency,
@@ -803,12 +931,30 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
             delivery_format=session.personalization_state.get("delivery_mode") or session.last_delivery_format or "explanation",
         )
         session.last_feedback_message = formative_feedback
+        _log_session_event(
+            session,
+            "/learn/chat",
+            "formative_evaluated",
+            {
+                "competency": competency,
+                "passed": formative_passed,
+                "score": formative_percent,
+                "easy_pass": easy_pass,
+                "formative_slot": session.formative_slot_number,
+            },
+        )
 
     if session.final_assessment_unlocked:
         session.phase = "competency_assessment"
         session.competency_interaction += 1
         session.current_assessment_prompt = _generate_assessment_prompt(session)
         session.add_message("assistant", session.current_assessment_prompt)
+        _record_session_interaction(
+            session,
+            interaction_type="final_assessment",
+            interaction_number=session.competency_interaction,
+            concept=session.current_competency,
+        )
         save_session(session)
         return {
             "session_id": session.session_id,
@@ -821,6 +967,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
             "gamification": build_gamification_payload(session),
             "anomaly_flags": anomalies,
             "backend_warnings": session.backend_warnings,
+            **_runtime_fields(session),
         }
 
     if _learning_window_exhausted(session) and not session.final_assessment_unlocked:
@@ -829,7 +976,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
         session.learning_turn = 1
         session.competency_interaction = 3
         relearn_feedback = "Mastery gate not met. Restart from interaction 3 and reteach the weakest concepts with simpler explanations and a different format."
-        ai_response = _generate_learning_response(session, user_message, relearn_feedback)
+        ai_response, interaction_type = _generate_learning_response(session, user_message, relearn_feedback)
         _record_remote_teaching_interaction(
             session,
             competency,
@@ -837,6 +984,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
             ai_response,
             user_message,
             formative_passed,
+            interaction_type="teaching" if interaction_type == "teach" else "formative_check",
         )
         save_session(session)
         return {
@@ -848,18 +996,19 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
             "message": ai_response,
             "ready_for_assessment": False,
             "mastery_reset": True,
+            "revision_required": session.revision_required,
             "gamification": build_gamification_payload(session),
             "anomaly_flags": anomalies,
             "backend_warnings": session.backend_warnings,
+            **_runtime_fields(session),
         }
 
     session.learning_turn += 1
     session.competency_interaction = 2 + session.learning_turn
-    if session.learning_turn > session.max_learning_turns:
-        session.revision_required = True
+    if session.revision_required and session.learning_turn > session.max_learning_turns:
         session.revision_turns_used = session.learning_turn - session.max_learning_turns
 
-    ai_response = _generate_learning_response(session, user_message, formative_feedback)
+    ai_response, interaction_type = _generate_learning_response(session, user_message, formative_feedback)
     _record_remote_teaching_interaction(
         session,
         competency,
@@ -867,6 +1016,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
         ai_response=ai_response,
         learner_input=user_message,
         formative_passed=formative_passed,
+        interaction_type="spaced_review" if interaction_type == "revision" else ("formative_check" if interaction_type == "formative" else "teaching"),
     )
     save_session(session)
     return {
@@ -884,6 +1034,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
         "bloom_level": session.bloom_level,
         "is_doubt_phase": session.is_doubt_phase,
         "awaiting_formative_response": session.awaiting_formative_response,
+        "revision_required": session.revision_required,
         "formative_check_results": session.formative_check_results,
         "message": ai_response,
         "ready_for_assessment": False,
@@ -891,6 +1042,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
         "gamification": build_gamification_payload(session),
         "anomaly_flags": anomalies,
         "backend_warnings": session.backend_warnings,
+        **_runtime_fields(session),
     }
 
 
@@ -918,6 +1070,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     summary = str(normalized.get("summary") or "").strip() or "No assessment summary returned."
     rubric_key = rubric.get("rubric_key") or competency
     rubric_version = get_rubric_version(competency)
+    rubric_hash = rubric.get("source_hash")
 
     remote_learning_session_id = _ensure_remote_learning_session(session, competency)
     if remote_learning_session_id:
@@ -932,8 +1085,9 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
             )
         except RemoteBackendError as exc:
             warning = f"Remote assessment sync failed for '{competency}': {exc}"
-            if warning not in session.backend_warnings:
-                session.backend_warnings.append(warning)
+            _set_remote_sync_failure(session, warning, remote_learning_session_id)
+        else:
+            _set_remote_sync_success(session, remote_learning_session_id)
 
     if passed:
         record_competency_attempt(
@@ -943,7 +1097,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
             "passed",
             score=overall,
             rubric_key=rubric_key,
-            evaluation={**normalized, "rubric_version": rubric_version},
+            evaluation={**normalized, "rubric_version": rubric_version, "rubric_source_hash": rubric_hash},
         )
         session.completed_competencies.append(
             CompetencyResult(
@@ -958,14 +1112,21 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
             session.learner_id,
             competency,
             f"{competency} Badge",
-            {"score": overall, "awarded_date": utc_now_iso()},
+            {"score": overall, "awarded_date": utc_now_iso(), "badge_type": "competency"},
         )
         session.earned_badges.append(badge)
         session.add_message("assistant", summary)
+        _log_session_event(session, "/assessment/competency", "badge_issued", badge)
         if session.is_last_competency:
             session.phase = "final_assessment"
             session.final_assessment_prompt = _generate_final_assessment_prompt(session)
             session.add_message("assistant", session.final_assessment_prompt)
+            _record_session_interaction(
+                session,
+                interaction_type="final_assessment",
+                interaction_number=session.competency_interaction + 1,
+                concept=session.topic,
+            )
             save_session(session)
             return {
                 "session_id": session.session_id,
@@ -980,11 +1141,13 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
                 "assessment_detail": normalized,
                 "rubric_source": rubric_source,
                 "rubric_version": rubric_version,
+                "rubric_source_hash": rubric_hash,
                 "final_assessment_prompt": session.final_assessment_prompt,
                 "ready_for_final_assessment": True,
                 "gamification": build_gamification_payload(session, competency_badge=badge),
                 "anomaly_flags": anomalies,
                 "backend_warnings": session.backend_warnings,
+                **_runtime_fields(session),
             }
 
         session.advance_to_next_competency()
@@ -1005,10 +1168,12 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
             "assessment_detail": normalized,
             "rubric_source": rubric_source,
             "rubric_version": rubric_version,
+            "rubric_source_hash": rubric_hash,
             "next_competency": session.current_competency,
             "gamification": build_gamification_payload(session, competency_badge=badge),
             "anomaly_flags": anomalies,
             "backend_warnings": session.backend_warnings,
+            **_runtime_fields(session),
         }
 
     record_competency_attempt(
@@ -1018,7 +1183,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         "failed",
         score=overall,
         rubric_key=rubric_key,
-        evaluation={**normalized, "rubric_version": rubric_version},
+        evaluation={**normalized, "rubric_version": rubric_version, "rubric_source_hash": rubric_hash},
     )
     session.competency_attempts[competency] = session.competency_attempt_number + 1
     _reset_learning_after_assessment_fail(session)
@@ -1028,7 +1193,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         f"Assessment score was {overall:.1f}%. Restart from interaction 3. "
         "Use the assessment feedback to reteach the weakest concepts in a different format."
     )
-    learning_message = _generate_learning_response(session, user_answer, relearn_feedback)
+    learning_message, interaction_type = _generate_learning_response(session, user_answer, relearn_feedback)
     _record_remote_teaching_interaction(
         session,
         competency,
@@ -1036,6 +1201,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         ai_response=learning_message,
         learner_input=user_answer,
         formative_passed=False,
+        interaction_type="spaced_review" if interaction_type == "revision" else ("formative_check" if interaction_type == "formative" else "teaching"),
     )
     save_session(session)
     return {
@@ -1049,10 +1215,12 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         "assessment_detail": normalized,
         "rubric_source": rubric_source,
         "rubric_version": rubric_version,
+        "rubric_source_hash": rubric_hash,
         "interaction_number": session.competency_interaction,
         "gamification": build_gamification_payload(session),
         "anomaly_flags": anomalies,
         "backend_warnings": session.backend_warnings,
+        **_runtime_fields(session),
     }
 
 
@@ -1082,6 +1250,16 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
         session.phase = "completed"
         session.completed_at = utc_now_iso()
         session.add_message("assistant", summary)
+        completion_badge = create_badge(
+            session.session_id,
+            session.learner_id,
+            session.topic,
+            f"{session.topic} Completion Badge",
+            {"awarded_date": utc_now_iso(), "badge_type": "completion", "score": overall},
+        )
+        session.completion_badge = completion_badge
+        session.earned_badges.append(completion_badge)
+        _log_session_event(session, "/assessment/final", "badge_issued", completion_badge)
         session_summary = build_session_summary(session)
         save_session(session)
         return {
@@ -1099,25 +1277,40 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
             "session_summary": session_summary,
             "anomaly_flags": anomalies,
             "backend_warnings": session.backend_warnings,
+            **_runtime_fields(session),
         }
 
-    retry_prompt = (
-        f"Final assessment score was {overall:.1f}%. Review the feedback and answer a refined integrated scenario.\n\n{prompt}"
-    )
-    session.phase = "final_assessment"
-    session.final_assessment_prompt = retry_prompt
+    _reset_learning_after_assessment_fail(session)
+    session.learning_turn = 1
+    session.competency_interaction = 3
     session.add_message("assistant", summary)
+    learning_message, interaction_type = _generate_learning_response(
+        session,
+        user_answer,
+        f"Final assessment score was {overall:.1f}%. Restart from interaction 3 and reteach the weakest concept with a different explanation style.",
+    )
+    _record_remote_teaching_interaction(
+        session,
+        session.current_competency,
+        ai_prompt=session.current_subpart or session.current_competency,
+        ai_response=learning_message,
+        learner_input=user_answer,
+        formative_passed=False,
+        interaction_type="spaced_review" if interaction_type == "revision" else ("formative_check" if interaction_type == "formative" else "teaching"),
+    )
     save_session(session)
     return {
         "session_id": session.session_id,
-        "phase": "final_assessment",
+        "phase": "learning",
         "passed": False,
         "score": overall,
-        "message": summary,
+        "message": learning_message,
+        "assessment_feedback": summary,
         "assessment_detail": normalized,
-        "final_assessment_prompt": retry_prompt,
-        "retry_allowed": True,
+        "interaction_number": session.competency_interaction,
+        "mastery_reset": True,
         "gamification": build_gamification_payload(session),
         "anomaly_flags": anomalies,
         "backend_warnings": session.backend_warnings,
+        **_runtime_fields(session),
     }

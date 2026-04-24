@@ -206,6 +206,16 @@ def get_rubric_version(competency_name: str) -> int | None:
     return int(row["version"]) if row else None
 
 
+def get_rubric_source_hash(competency_name: str) -> str | None:
+    key = normalize_rubric_key(competency_name)
+    with get_connection() as conn:
+        row = conn.execute(
+            'SELECT source_hash FROM locked_rubrics WHERE rubric_key = ? AND is_locked = 1',
+            (key,),
+        ).fetchone()
+    return str(row["source_hash"]) if row else None
+
+
 def upsert_locked_rubric(
     competency_name: str,
     rubric_payload: dict[str, Any],

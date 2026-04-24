@@ -2,6 +2,7 @@ import json
 import os
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -46,6 +47,22 @@ class FakeCrew:
         if self.kind == "assessment":
             competency = inputs.get("competency", "")
             if "Formative check" in competency:
+                learner_response = inputs.get("user_response", "")
+                if "fail formative" in learner_response:
+                    return Result(
+                        json.dumps(
+                            {
+                                "criteria_scores": [
+                                    {"criterion_id": "formative_accuracy", "met": False, "evidence": "Inaccurate"},
+                                    {"criterion_id": "formative_application", "met": False, "evidence": "Did not apply"},
+                                    {"criterion_id": "formative_explanation", "met": False, "evidence": "Unclear"},
+                                ],
+                                "overall_percent": 0.0,
+                                "pass": False,
+                                "summary": "Formative check failed.",
+                            }
+                        )
+                    )
                 return Result(
                     json.dumps(
                         {
@@ -61,6 +78,23 @@ class FakeCrew:
                     )
                 )
             if "Final micro-credential assessment" in competency:
+                learner_response = inputs.get("user_response", "")
+                if "force final fail" in learner_response:
+                    return Result(
+                        json.dumps(
+                            {
+                                "criteria_scores": [
+                                    {"criterion_id": "c1", "met": False, "evidence": "Integrated application missing"},
+                                    {"criterion_id": "c2", "met": False, "evidence": "Weak reasoning"},
+                                    {"criterion_id": "c3", "met": False, "evidence": "Execution vague"},
+                                    {"criterion_id": "c4", "met": False, "evidence": "No risk awareness"},
+                                ],
+                                "overall_percent": 0.0,
+                                "pass": False,
+                                "summary": "Final assessment failed.",
+                            }
+                        )
+                    )
                 return Result(
                     json.dumps(
                         {
@@ -100,6 +134,7 @@ class EngineFlowTests(unittest.TestCase):
         cls.repo = Path(__file__).resolve().parent.parent
         cls.db_file = cls.repo / "data" / "test_engine.db"
         os.environ["AI_ENGINE_DB_PATH"] = str(cls.db_file)
+        os.environ["RUBRIC_ADMIN_KEY"] = "test-admin-key"
         os.chdir(cls.repo)
 
         from app.main import app
@@ -266,6 +301,10 @@ class EngineFlowTests(unittest.TestCase):
             self.assertEqual(status_payload["phase"], "completed")
             self.assertEqual(len(status_payload["completed_competencies"]), 2)
             self.assertGreater(status_payload["gamification"]["points_total"], 0)
+            self.assertEqual(status_payload["remote_sync"]["last_sync_outcome"], "synced")
+            self.assertIsNotNone(status_payload["gamification"]["completion_badge"])
+            self.assertEqual(status_payload["required_next_action"], "generate_certificate")
+            self.assertIn("completed_competencies", status_payload["session_summary"])
 
     def test_guards_block_out_of_phase_actions(self):
         with TestClient(self.app) as client:
@@ -321,6 +360,116 @@ class EngineFlowTests(unittest.TestCase):
             detail = response.json()["detail"]
             self.assertIn("missing_competencies", detail)
             self.assertIn("Define AI scope", detail["missing_competencies"])
+
+    def test_docs_openapi_and_new_backend_proxy_routes_are_exposed(self):
+        with TestClient(self.app) as client:
+            docs = client.get("/docs")
+            self.assertEqual(docs.status_code, 200)
+
+            openapi = client.get("/openapi.json")
+            self.assertEqual(openapi.status_code, 200)
+            paths = openapi.json()["paths"]
+            self.assertIn("/backend/enrollment/check-access/{mc_id}", paths)
+            self.assertIn("/backend/learning/sessions/start", paths)
+            self.assertIn("/backend/learning/sessions/{session_id}", paths)
+            self.assertIn("/backend/learning/sessions/{session_id}/interact", paths)
+            self.assertIn("/backend/learning/sessions/{session_id}/assess", paths)
+            self.assertIn("/backend/gamification/progress/{session_id}", paths)
+
+    def test_remote_rubric_proxy_is_marked_unsupported(self):
+        with TestClient(self.app) as client:
+            response = client.get("/backend/lesson/rubric/61")
+            self.assertEqual(response.status_code, 501)
+
+    def test_revision_flow_requires_two_extra_interactions_after_two_failed_formatives(self):
+        with TestClient(self.app) as client:
+            session_id = self._start_remote_session(client)
+            client.post("/pre-assessment/start", json={"session_id": session_id})
+            start_learning = client.post(
+                "/pre-assessment/chat",
+                json={"session_id": session_id, "answer": "I know the basics and can explain structure and constraints."},
+            )
+            self.assertEqual(start_learning.status_code, 200, start_learning.text)
+
+            interaction_4 = client.post("/learn/chat", json={"session_id": session_id, "message": "advance one"})
+            self.assertEqual(interaction_4.status_code, 200, interaction_4.text)
+            self.assertEqual(interaction_4.json()["interaction_number"], 4)
+
+            after_fail_1 = client.post("/learn/chat", json={"session_id": session_id, "message": "fail formative one"})
+            self.assertEqual(after_fail_1.status_code, 200, after_fail_1.text)
+            self.assertEqual(after_fail_1.json()["interaction_number"], 5)
+
+            interaction_6 = client.post("/learn/chat", json={"session_id": session_id, "message": "advance two"})
+            self.assertEqual(interaction_6.status_code, 200, interaction_6.text)
+            self.assertEqual(interaction_6.json()["interaction_number"], 6)
+
+            after_fail_2 = client.post("/learn/chat", json={"session_id": session_id, "message": "fail formative two"})
+            self.assertEqual(after_fail_2.status_code, 200, after_fail_2.text)
+            self.assertTrue(after_fail_2.json()["revision_required"])
+
+            revision_1 = client.post("/learn/chat", json={"session_id": session_id, "message": "revision step one"})
+            self.assertEqual(revision_1.status_code, 200, revision_1.text)
+            self.assertEqual(revision_1.json()["interaction_number"], 8)
+
+            revision_2 = client.post("/learn/chat", json={"session_id": session_id, "message": "revision step two"})
+            self.assertEqual(revision_2.status_code, 200, revision_2.text)
+            self.assertEqual(revision_2.json()["interaction_type"], "revision")
+
+    def test_final_assessment_failure_resets_to_interaction_three(self):
+        with TestClient(self.app) as client:
+            session_id = self._start_remote_session(client)
+            first = self._finish_current_competency(client, session_id)
+            self.assertEqual(first["phase"], "pre_assessment")
+            second = self._finish_current_competency(client, session_id)
+            self.assertEqual(second["phase"], "final_assessment")
+
+            final_response = client.post(
+                "/assessment/final",
+                json={"session_id": session_id, "answer": "force final fail"},
+            )
+            self.assertEqual(final_response.status_code, 200, final_response.text)
+            payload = final_response.json()
+            self.assertEqual(payload["phase"], "learning")
+            self.assertEqual(payload["interaction_number"], 3)
+            self.assertTrue(payload["mastery_reset"])
+
+
+class RemoteBackendContractTests(unittest.TestCase):
+    def test_remote_backend_client_uses_live_swagger_paths(self):
+        from app.remote_backend import RemoteBackendClient
+
+        client = RemoteBackendClient()
+
+        def fake_request(method, url, **kwargs):
+            class FakeResponse:
+                status_code = 200
+                content = b"{}"
+                text = "{}"
+
+                def json(self):
+                    return {}
+
+            calls.append((method, url))
+            return FakeResponse()
+
+        calls = []
+        with patch("app.remote_backend.requests.request", side_effect=fake_request):
+            client.login("a@example.com", "secret")
+            client.fetch_profile(token="token")
+            client.fetch_lesson_competencies(domain_id=22, micro_credential_id=197)
+            client.check_access(197, token="token")
+            client.start_learning_session(competency_id=61, token="token")
+            client.fetch_learning_session(501, token="token")
+            client.fetch_gamification_progress(501, token="token")
+
+        urls = [url for _, url in calls]
+        self.assertIn("https://lifechoice.duckdns.org/auth/login/login/", urls)
+        self.assertIn("https://lifechoice.duckdns.org/auth/profile/me/", urls)
+        self.assertIn("https://lifechoice.duckdns.org/lesson/competencies/", urls)
+        self.assertIn("https://lifechoice.duckdns.org/enrollment/enrollments/check-access/197/", urls)
+        self.assertIn("https://lifechoice.duckdns.org/learning/sessions/start/", urls)
+        self.assertIn("https://lifechoice.duckdns.org/learning/sessions/501/", urls)
+        self.assertIn("https://lifechoice.duckdns.org/gamification/progress/501/", urls)
 
 
 if __name__ == "__main__":

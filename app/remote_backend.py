@@ -92,20 +92,12 @@ class RemoteBackendClient:
             params["competency_id"] = competency_id
         return self._request("GET", "/lesson/competencies/", params=params)
 
-    def fetch_rubric(self, competency_id: int) -> dict[str, Any] | None:
-        payload = self._request(
-            "GET",
-            f"/lesson/rubrics/by-competency/{competency_id}/",
-            allow_404=True,
-        )
-        return payload or None
-
-    def check_access(self, micro_credential_id: int, *, token: str | None) -> dict[str, Any]:
+    def check_access(self, mc_id: int, *, token: str | None) -> dict[str, Any]:
         if not (token or self.default_token):
             raise RemoteBackendError("Remote backend auth token is required to check enrollment access")
         return self._request(
             "GET",
-            f"/enrollment/enrollments/check-access/{micro_credential_id}/",
+            f"/enrollment/enrollments/check-access/{mc_id}/",
             token=token,
         )
 

@@ -18,6 +18,9 @@ class CompetencyResult(BaseModel):
     feedback: str = ""
 
 
+InteractionType = Literal['intro', 'diagnostic', 'teach', 'formative', 'revision', 'final_assessment']
+
+
 STAGE_MAP = {
     'foundation': {'turns': (1, 2), 'bloom': 'Understand'},
     'guided_application': {'turns': (3, 4), 'bloom': 'Apply'},
@@ -88,6 +91,12 @@ class LearnerSession(BaseModel):
     final_assessment_attempts: int = 0
     personalization_state: Dict[str, str] = Field(default_factory=dict)
     delivery_history: List[str] = Field(default_factory=list)
+    delivery_format_history: List[str] = Field(default_factory=list)
+    concept_history: List[str] = Field(default_factory=list)
+    interaction_history: List[Dict[str, Any]] = Field(default_factory=list)
+    current_interaction_type: InteractionType = 'intro'
+    current_delivery_format: Optional[str] = None
+    consecutive_easy_passes: int = 0
     messages: List[ChatMessage] = Field(default_factory=list)
     study_materials: Dict[str, str] = Field(default_factory=dict)
     learning_plans: Dict[str, str] = Field(default_factory=dict)
@@ -101,8 +110,19 @@ class LearnerSession(BaseModel):
     streak_count: int = 0
     streak_bonus_awarded: bool = False
     earned_badges: List[dict] = Field(default_factory=list)
+    completion_badge: Optional[dict] = None
     last_delivery_format: Optional[str] = None
     last_feedback_message: Optional[str] = None
+    remote_sync_status: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "backend_session_id": None,
+            "last_sync_at": None,
+            "last_sync_outcome": "not_synced",
+            "warning": None,
+            "warning_list": [],
+        }
+    )
+    remote_last_event_at: Optional[str] = None
     session_summary: Dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -171,6 +191,26 @@ class LearnerSession(BaseModel):
             return 100.0
         return round(((completed + (self.competency_progress_percent / 100.0)) / total) * 100, 2)
 
+    @property
+    def required_next_action(self) -> str:
+        if self.phase == 'pre_assessment':
+            return 'answer_diagnostic' if self.pre_assessment_prompt else 'start_pre_assessment'
+        if self.phase == 'learning':
+            return 'answer_formative_check' if self.awaiting_formative_response else 'continue_learning'
+        if self.phase == 'competency_assessment':
+            return 'submit_competency_assessment'
+        if self.phase == 'final_assessment':
+            return 'submit_final_assessment'
+        if self.phase == 'completed' and self.identity_verified:
+            return 'generate_certificate'
+        return 'session_complete'
+
+    @property
+    def formative_slot_number(self) -> Optional[int]:
+        if self.current_formative_slot < 0:
+            return None
+        return self.current_formative_slot + 1
+
     def format_recent_history(self, n: int = 10) -> str:
         if not self.messages:
             return 'No conversation yet.'
@@ -183,6 +223,57 @@ class LearnerSession(BaseModel):
     def add_message(self, role: str, content: str):
         self.messages.append(ChatMessage(role=role, content=content))
         self.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def record_interaction_event(
+        self,
+        *,
+        interaction_type: InteractionType,
+        concept: str,
+        delivery_format: Optional[str],
+        interaction_number: int,
+        phase: str,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self.current_interaction_type = interaction_type
+        self.current_delivery_format = delivery_format
+        if delivery_format:
+            self.last_delivery_format = delivery_format
+            self.delivery_history.append(delivery_format)
+            self.delivery_format_history.append(delivery_format)
+        if concept:
+            self.concept_history.append(concept)
+        self.interaction_history.append(
+            {
+                "interaction_number": interaction_number,
+                "phase": phase,
+                "interaction_type": interaction_type,
+                "concept": concept,
+                "delivery_format": delivery_format,
+                "created_at": now,
+            }
+        )
+        self.updated_at = now
+
+    def set_remote_sync(
+        self,
+        *,
+        outcome: str,
+        backend_session_id: Optional[int] = None,
+        warning: Optional[str] = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        warnings = list(self.remote_sync_status.get("warning_list") or [])
+        if warning and warning not in warnings:
+            warnings.append(warning)
+        self.remote_sync_status = {
+            "backend_session_id": backend_session_id or self.current_remote_learning_session_id,
+            "last_sync_at": now,
+            "last_sync_outcome": outcome,
+            "warning": warning,
+            "warning_list": warnings,
+        }
+        self.remote_last_event_at = now
+        self.updated_at = now
 
     def award_points_for_formative(self, passed: bool) -> int:
         self.streak_bonus_awarded = False
@@ -207,8 +298,17 @@ class LearnerSession(BaseModel):
         duration_seconds = max(0, int((finished - started).total_seconds()))
         self.session_summary = {
             'total_points': self.points_total,
-            'completed_competencies': len(self.completed_competencies),
-            'badges_earned': len(self.earned_badges),
+            'completed_competencies': [item.competency for item in self.completed_competencies],
+            'completed_competency_count': len(self.completed_competencies),
+            'badges_earned': [
+                {
+                    'badge_name': badge.get('badge_name'),
+                    'awarded_at': badge.get('awarded_at'),
+                    'competency_name': badge.get('competency_name'),
+                }
+                for badge in self.earned_badges
+            ],
+            'completion_badge': self.completion_badge,
             'time_taken_seconds': duration_seconds,
         }
         return self.session_summary
@@ -243,9 +343,13 @@ class LearnerSession(BaseModel):
         self.final_assessment_attempts = 0
         self.current_subpart_index = 0
         self.delivery_history = []
+        self.delivery_format_history = []
         self.personalization_state = {}
         self.last_points_delta = 0
         self.streak_bonus_awarded = False
         self.last_delivery_format = None
         self.last_feedback_message = None
+        self.current_interaction_type = 'intro'
+        self.current_delivery_format = None
+        self.consecutive_easy_passes = 0
         self.updated_at = datetime.now(timezone.utc).isoformat()

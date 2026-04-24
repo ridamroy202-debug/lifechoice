@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.persistence import add_anomaly_flag, get_unresolved_anomalies
-from app.state import LearnerSession
+from app.state import LearnerSession, STREAK_BONUS_POINTS
 
 
 ENCOURAGEMENT_MESSAGES = [
@@ -64,12 +64,26 @@ def build_gamification_payload(session: LearnerSession, *, competency_badge: dic
         'points_delta': session.last_points_delta,
         'streak_count': session.streak_count,
         'streak_bonus_awarded': session.streak_bonus_awarded,
+        'streak_bonus_points': STREAK_BONUS_POINTS if session.streak_bonus_awarded else 0,
         'progress_percent': session.overall_progress_percent,
         'competency_progress_percent': session.competency_progress_percent,
         'competency_badge': competency_badge,
+        'completion_badge': session.completion_badge,
         'earned_badges': session.earned_badges,
+        'feedback_message': session.last_feedback_message,
+        'session_summary': session.session_summary,
     }
 
 
 def build_session_summary(session: LearnerSession) -> dict[str, Any]:
     return session.build_session_summary()
+
+
+def build_session_runtime_payload(session: LearnerSession) -> dict[str, Any]:
+    return {
+        'remote_sync': session.remote_sync_status,
+        'interaction_type': session.current_interaction_type,
+        'delivery_format': session.current_delivery_format,
+        'formative_slot': session.formative_slot_number,
+        'required_next_action': session.required_next_action,
+    }

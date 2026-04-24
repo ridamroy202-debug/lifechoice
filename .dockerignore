@@ -1,0 +1,18 @@
+.git
+.gitignore
+.venv
+.env
+.codex
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite*
+.pytest_cache/
+.mypy_cache/
+
+data/
+generated_certificates/
+tests/
+docs/
+test.ipynb
+IKON SKILLS AssessmentEngine v3.pdf

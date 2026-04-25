@@ -142,6 +142,15 @@ jobs:
             $DOCKER rm "$CONTAINER_NAME" || true
           fi
 
+          PORT_CONTAINERS="$($DOCKER ps -q --filter "publish=$APP_PORT")"
+          if [ -n "$PORT_CONTAINERS" ]; then
+            echo "Removing existing Docker container(s) already publishing port $APP_PORT:"
+            $DOCKER ps --filter "publish=$APP_PORT" --format 'table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}'
+            for container_id in $PORT_CONTAINERS; do
+              $DOCKER rm -f "$container_id"
+            done
+          fi
+
           $DOCKER volume create lifechoice-ai-engine-data >/dev/null
           $DOCKER volume create lifechoice-ai-engine-certificates >/dev/null
 

@@ -437,3 +437,170 @@ def get_certificate_record(certificate_id: str) -> dict[str, Any] | None:
         'metadata': json.loads(row['metadata_json']),
         'issued_at': row['issued_at'],
     }
+
+
+def upsert_learner_competency_progress(
+    learner_id: str,
+    micro_credential_id: int,
+    competency_id: int,
+    competency_name: str,
+    *,
+    passed: bool,
+    latest_session_id: str | None = None,
+    latest_score: float | None = None,
+) -> None:
+    now = utc_now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            '''
+            INSERT INTO learner_competency_progress
+            (learner_id, micro_credential_id, competency_id, competency_name, passed, latest_session_id, latest_score, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(learner_id, micro_credential_id, competency_id) DO UPDATE SET
+                competency_name=excluded.competency_name,
+                passed=excluded.passed,
+                latest_session_id=excluded.latest_session_id,
+                latest_score=excluded.latest_score,
+                updated_at=excluded.updated_at
+            ''',
+            (
+                learner_id,
+                int(micro_credential_id),
+                int(competency_id),
+                competency_name,
+                1 if passed else 0,
+                latest_session_id,
+                latest_score,
+                now,
+            ),
+        )
+
+
+def list_learner_competency_progress(learner_id: str, micro_credential_id: int) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            '''
+            SELECT learner_id, micro_credential_id, competency_id, competency_name, passed, latest_session_id, latest_score, updated_at
+            FROM learner_competency_progress
+            WHERE learner_id = ? AND micro_credential_id = ?
+            ORDER BY competency_id ASC
+            ''',
+            (learner_id, int(micro_credential_id)),
+        ).fetchall()
+    return [
+        {
+            "learner_id": row["learner_id"],
+            "micro_credential_id": int(row["micro_credential_id"]),
+            "competency_id": int(row["competency_id"]),
+            "competency_name": row["competency_name"],
+            "passed": bool(row["passed"]),
+            "latest_session_id": row["latest_session_id"],
+            "latest_score": row["latest_score"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
+def get_learner_competency_progress(
+    learner_id: str,
+    micro_credential_id: int,
+    competency_id: int,
+) -> dict[str, Any] | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            '''
+            SELECT learner_id, micro_credential_id, competency_id, competency_name, passed, latest_session_id, latest_score, updated_at
+            FROM learner_competency_progress
+            WHERE learner_id = ? AND micro_credential_id = ? AND competency_id = ?
+            ''',
+            (learner_id, int(micro_credential_id), int(competency_id)),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "learner_id": row["learner_id"],
+        "micro_credential_id": int(row["micro_credential_id"]),
+        "competency_id": int(row["competency_id"]),
+        "competency_name": row["competency_name"],
+        "passed": bool(row["passed"]),
+        "latest_session_id": row["latest_session_id"],
+        "latest_score": row["latest_score"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def create_remote_learning_session_ref(
+    remote_session_id: int,
+    learner_id: str,
+    micro_credential_id: int,
+    competency_id: int,
+    competency_name: str,
+    *,
+    domain_id: int | None = None,
+) -> None:
+    now = utc_now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            '''
+            INSERT OR REPLACE INTO remote_learning_session_refs
+            (remote_session_id, learner_id, micro_credential_id, competency_id, competency_name, domain_id, status, latest_score, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM remote_learning_session_refs WHERE remote_session_id = ?), ?), ?)
+            ''',
+            (
+                int(remote_session_id),
+                learner_id,
+                int(micro_credential_id),
+                int(competency_id),
+                competency_name,
+                domain_id,
+                "started",
+                None,
+                int(remote_session_id),
+                now,
+                now,
+            ),
+        )
+
+
+def get_remote_learning_session_ref(remote_session_id: int) -> dict[str, Any] | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            '''
+            SELECT remote_session_id, learner_id, micro_credential_id, competency_id, competency_name, domain_id, status, latest_score, created_at, updated_at
+            FROM remote_learning_session_refs
+            WHERE remote_session_id = ?
+            ''',
+            (int(remote_session_id),),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "remote_session_id": int(row["remote_session_id"]),
+        "learner_id": row["learner_id"],
+        "micro_credential_id": int(row["micro_credential_id"]),
+        "competency_id": int(row["competency_id"]),
+        "competency_name": row["competency_name"],
+        "domain_id": row["domain_id"],
+        "status": row["status"],
+        "latest_score": row["latest_score"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def update_remote_learning_session_ref(
+    remote_session_id: int,
+    *,
+    status: str,
+    latest_score: float | None = None,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            '''
+            UPDATE remote_learning_session_refs
+            SET status = ?, latest_score = ?, updated_at = ?
+            WHERE remote_session_id = ?
+            ''',
+            (status, latest_score, utc_now_iso(), int(remote_session_id)),
+        )

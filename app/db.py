@@ -147,5 +147,30 @@ def init_db() -> None:
                 issued_at TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES learning_sessions (session_id)
             );
+
+            CREATE TABLE IF NOT EXISTS learner_competency_progress (
+                learner_id TEXT NOT NULL,
+                micro_credential_id INTEGER NOT NULL,
+                competency_id INTEGER NOT NULL,
+                competency_name TEXT NOT NULL,
+                passed INTEGER NOT NULL DEFAULT 0,
+                latest_session_id TEXT,
+                latest_score REAL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (learner_id, micro_credential_id, competency_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS remote_learning_session_refs (
+                remote_session_id INTEGER PRIMARY KEY,
+                learner_id TEXT NOT NULL,
+                micro_credential_id INTEGER NOT NULL,
+                competency_id INTEGER NOT NULL,
+                competency_name TEXT NOT NULL,
+                domain_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'started',
+                latest_score REAL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             '''
         )

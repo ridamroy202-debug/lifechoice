@@ -1,0 +1,67 @@
+INFO:httpx:HTTP Request: POST http://testserver/session/start "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:OpenAI API usage: {'prompt_tokens': 641, 'completion_tokens': 141, 'total_tokens': 782}
+INFO:httpx:HTTP Request: POST http://testserver/pre-assessment/start "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: GET http://testserver/session/9fbe1882-1e01-484c-800b-3e04250d736f "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:OpenAI API usage: {'prompt_tokens': 693, 'completion_tokens': 34, 'total_tokens': 727}
+ERROR:crewai.events.listeners.tracing.trace_batch_manager:\u274c Error finalizing trace batch: 'charmap' codec can't encode character '\u2705' in position 0: character maps to <undefined>
+ERROR:crewai.events.listeners.tracing.trace_batch_manager:\u274c Error finalizing trace batch: 'charmap' codec can't encode character '\u2705' in position 0: character maps to <undefined>
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:OpenAI API usage: {'prompt_tokens': 1598, 'completion_tokens': 3002, 'total_tokens': 4600}
+WARNING:crewai.events.listeners.tracing.trace_batch_manager:Trace batch initialization returned status 401. Continuing without tracing.
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:OpenAI API usage: {'prompt_tokens': 874, 'completion_tokens': 289, 'total_tokens': 1163}
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:OpenAI API usage: {'prompt_tokens': 5697, 'completion_tokens': 584, 'total_tokens': 6281}
+INFO:httpx:HTTP Request: POST http://testserver/pre-assessment/chat "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: GET http://testserver/session/9fbe1882-1e01-484c-800b-3e04250d736f "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:OpenAI API usage: {'prompt_tokens': 6274, 'completion_tokens': 608, 'total_tokens': 6882}
+INFO:httpx:HTTP Request: POST http://testserver/learn/chat "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: GET http://testserver/session/9fbe1882-1e01-484c-800b-3e04250d736f "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+INFO:root:Anthropic API usage: {'input_tokens': 1562, 'output_tokens': 375, 'total_tokens': 1937}
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:OpenAI API usage: {'prompt_tokens': 7108, 'completion_tokens': 701, 'total_tokens': 7809}
+INFO:httpx:HTTP Request: POST http://testserver/learn/chat "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: GET http://testserver/session/9fbe1882-1e01-484c-800b-3e04250d736f "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:OpenAI API usage: {'prompt_tokens': 7687, 'completion_tokens': 775, 'total_tokens': 8462}
+INFO:httpx:HTTP Request: POST http://testserver/learn/chat "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: GET http://testserver/session/9fbe1882-1e01-484c-800b-3e04250d736f "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+INFO:root:Anthropic API usage: {'input_tokens': 1806, 'output_tokens': 453, 'total_tokens': 2259}
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:OpenAI API usage: {'prompt_tokens': 8688, 'completion_tokens': 778, 'total_tokens': 9466}
+INFO:httpx:HTTP Request: POST http://testserver/learn/chat "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: GET http://testserver/session/9fbe1882-1e01-484c-800b-3e04250d736f "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:OpenAI API usage: {'prompt_tokens': 9147, 'completion_tokens': 844, 'total_tokens': 9991}
+INFO:httpx:HTTP Request: POST http://testserver/learn/chat "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: GET http://testserver/session/9fbe1882-1e01-484c-800b-3e04250d736f "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+INFO:root:Anthropic API usage: {'input_tokens': 1904, 'output_tokens': 365, 'total_tokens': 2269}
+INFO:httpx:HTTP Request: POST http://testserver/learn/chat "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+INFO:root:Anthropic API usage: {'input_tokens': 1188, 'output_tokens': 453, 'total_tokens': 1641}
+INFO:httpx:HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+INFO:root:OpenAI API usage: {'prompt_tokens': 9120, 'completion_tokens': 558, 'total_tokens': 9678}
+INFO:httpx:HTTP Request: POST http://testserver/assessment/competency "HTTP/1.1 200 OK"
+Traceback (most recent call last):
+  File "C:\Users\Ridam\Desktop\LifeChoice_with_crew\scripts\live_single_competency_test.py", line 224, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "C:\Users\Ridam\Desktop\LifeChoice_with_crew\scripts\live_single_competency_test.py", line 215, in main
+    print("assessment_result=", result)
+  File "C:\Users\Ridam\Desktop\LifeChoice_with_crew\.venv\Lib\site-packages\crewai\llm.py", line 120, in write
+    return self._original_stream.write(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Ridam\AppData\Local\Programs\Python\Python311\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f3af' in position 2610: character maps to <undefined>

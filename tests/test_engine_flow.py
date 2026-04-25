@@ -160,6 +160,8 @@ class EngineFlowTests(unittest.TestCase):
                 DELETE FROM final_assessments;
                 DELETE FROM formative_checks;
                 DELETE FROM competency_attempts;
+                DELETE FROM learner_competency_progress;
+                DELETE FROM remote_learning_session_refs;
                 DELETE FROM learning_sessions;
                 DELETE FROM learners;
                 DELETE FROM locked_rubrics;
@@ -201,19 +203,21 @@ class EngineFlowTests(unittest.TestCase):
 
         backend = self.main_mod.remote_backend_client
         backend.fetch_lesson_competencies = lambda **kwargs: payload
-        backend.check_access = lambda *args, **kwargs: {"access": {"can_start_session": True, "enrollment": {"id": 901}}}
+        backend.check_access = lambda *args, **kwargs: {"success": True, "access": {"can_access": True, "message": "Access granted", "micro_credential_id": "197"}}
         backend.fetch_profile = lambda **kwargs: {
-            "data": {
+            "success": True,
+            "profile": {
                 "id": "7",
                 "full_name": "Ridam Test",
                 "email": "ridam@example.com",
                 "updated_at": "2026-04-18T00:00:00+00:00",
             }
         }
-        backend.start_learning_session = lambda **kwargs: {"id": 500 + int(kwargs["competency_id"])}
+        backend.start_learning_session = lambda **kwargs: {"success": True, "session": {"id": 500 + int(kwargs["competency_id"]), "status": "in_progress"}}
         backend.record_interaction = lambda **kwargs: {"ok": True}
         backend.submit_assessment = lambda **kwargs: {"ok": True}
-        backend.fetch_gamification_progress = lambda *args, **kwargs: {"points": 0}
+        backend.fetch_learning_session = lambda session_id, **kwargs: {"success": True, "session": {"id": session_id, "status": "active"}}
+        backend.fetch_gamification_progress = lambda *args, **kwargs: {"success": True, "progress": {"points_earned": 0}}
 
         self.orch.remote_backend_client.fetch_lesson_competencies = backend.fetch_lesson_competencies
         self.orch.remote_backend_client.check_access = backend.check_access
@@ -221,6 +225,7 @@ class EngineFlowTests(unittest.TestCase):
         self.orch.remote_backend_client.start_learning_session = backend.start_learning_session
         self.orch.remote_backend_client.record_interaction = backend.record_interaction
         self.orch.remote_backend_client.submit_assessment = backend.submit_assessment
+        self.orch.remote_backend_client.fetch_learning_session = backend.fetch_learning_session
         self.orch.remote_backend_client.fetch_gamification_progress = backend.fetch_gamification_progress
 
     def _start_remote_session(self, client: TestClient) -> str:
@@ -370,16 +375,99 @@ class EngineFlowTests(unittest.TestCase):
             self.assertEqual(openapi.status_code, 200)
             paths = openapi.json()["paths"]
             self.assertIn("/backend/enrollment/check-access/{mc_id}", paths)
+            self.assertIn("/backend/enrollment/check-access", paths)
+            self.assertIn("/backend/auth/profile/me", paths)
             self.assertIn("/backend/learning/sessions/start", paths)
             self.assertIn("/backend/learning/sessions/{session_id}", paths)
             self.assertIn("/backend/learning/sessions/{session_id}/interact", paths)
             self.assertIn("/backend/learning/sessions/{session_id}/assess", paths)
             self.assertIn("/backend/gamification/progress/{session_id}", paths)
+            self.assertIn("/backend/learner/micro-credential/progress", paths)
 
     def test_remote_rubric_proxy_is_marked_unsupported(self):
         with TestClient(self.app) as client:
             response = client.get("/backend/lesson/rubric/61")
             self.assertEqual(response.status_code, 501)
+
+    def test_backend_profile_competencies_access_and_learning_session_routes(self):
+        with TestClient(self.app) as client:
+            profile = client.post(
+                "/backend/auth/profile/me",
+                json={"micro_credential_id": 197, "auth_token": "token"},
+            )
+            self.assertEqual(profile.status_code, 200, profile.text)
+            profile_payload = profile.json()
+            self.assertEqual(profile_payload["micro_credential"]["id"], 197)
+            self.assertEqual(len(profile_payload["competencies"]), 2)
+
+            competencies = client.post(
+                "/backend/lesson/competencies",
+                json={"micro_credential_id": 197},
+            )
+            self.assertEqual(competencies.status_code, 200, competencies.text)
+            self.assertEqual(competencies.json()["data"]["domains"][0]["micro_credentials"][0]["id"], 197)
+
+            access = client.post(
+                "/backend/enrollment/check-access",
+                json={"micro_credential_id": 197, "auth_token": "token"},
+            )
+            self.assertEqual(access.status_code, 200, access.text)
+            self.assertTrue(access.json()["access"]["can_access"])
+
+            start_first = client.post(
+                "/backend/learning/sessions/start",
+                json={"micro_credential_id": 197, "competency_id": 61, "auth_token": "token"},
+            )
+            self.assertEqual(start_first.status_code, 200, start_first.text)
+            self.assertTrue(start_first.json()["previous_competencies_passed"])
+            remote_session_id = start_first.json()["learning_session"]["session"]["id"]
+
+            progress_initial = client.get(
+                "/backend/learner/micro-credential/progress",
+                params={"micro_credential_id": 197, "auth_token": "token"},
+            )
+            self.assertEqual(progress_initial.status_code, 200, progress_initial.text)
+            self.assertEqual(progress_initial.json()["progress"]["completed_competencies"], 0)
+
+            block_second = client.post(
+                "/backend/learning/sessions/start",
+                json={"micro_credential_id": 197, "competency_id": 62, "auth_token": "token"},
+            )
+            self.assertEqual(block_second.status_code, 409, block_second.text)
+
+            assess = client.post(
+                f"/backend/learning/sessions/{remote_session_id}/assess",
+                json={
+                    "scenario_question": "question",
+                    "learner_response": "answer",
+                    "rubric_score": 80.0,
+                    "ai_feedback": "good",
+                    "auth_token": "token",
+                },
+            )
+            self.assertEqual(assess.status_code, 200, assess.text)
+
+            start_second = client.post(
+                "/backend/learning/sessions/start",
+                json={"micro_credential_id": 197, "competency_id": 62, "auth_token": "token"},
+            )
+            self.assertEqual(start_second.status_code, 200, start_second.text)
+
+            detail = client.get(
+                f"/backend/learning/sessions/{remote_session_id}",
+                params={"auth_token": "token"},
+            )
+            self.assertEqual(detail.status_code, 200, detail.text)
+            self.assertEqual(detail.json()["local"]["status"], "passed")
+
+            progress_final = client.get(
+                "/backend/learner/micro-credential/progress",
+                params={"micro_credential_id": 197, "auth_token": "token"},
+            )
+            self.assertEqual(progress_final.status_code, 200, progress_final.text)
+            progress_payload = progress_final.json()
+            self.assertEqual(progress_payload["progress"]["completed_competencies"], 1)
+            self.assertEqual(progress_payload["progress"]["next_available_competency_id"], 62)
 
     def test_revision_flow_requires_two_extra_interactions_after_two_failed_formatives(self):
         with TestClient(self.app) as client:

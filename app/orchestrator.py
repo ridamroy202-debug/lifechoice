@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 import yaml
@@ -17,6 +18,7 @@ from app.persistence import (
     get_locked_rubric,
     get_rubric_source_hash,
     get_rubric_version,
+    upsert_learner_competency_progress,
     record_competency_attempt,
     record_final_assessment,
     record_formative_check,
@@ -324,7 +326,8 @@ def _ensure_remote_learning_session(session: LearnerSession, competency: str) ->
         _set_remote_sync_failure(session, warning)
         return None
 
-    remote_session_id = payload.get("id")
+    session_payload = payload.get("session") if isinstance(payload.get("session"), dict) else payload
+    remote_session_id = session_payload.get("id")
     if isinstance(remote_session_id, int):
         session.remote_learning_sessions[competency] = remote_session_id
         _set_remote_sync_success(session, remote_session_id)
@@ -428,6 +431,8 @@ def _build_personalization_state(session: LearnerSession) -> dict[str, str]:
         "mastery_status": "ready" if session.final_assessment_unlocked else "in_progress",
         "revision_mode": "active" if session.revision_required else "inactive",
         "spaced_learning_rule": "one concept per interaction",
+        "academic_stage": session.academic_stage,
+        "academic_guidance": session.academic_guidance,
     }
     session.personalization_state = state
     return state
@@ -446,6 +451,9 @@ async def _setup_competency(session: LearnerSession):
                 "competency": competency_label,
                 "user_level": session.user_level,
                 "context_description": context_description,
+                "remote_micro_credential_level": session.remote_micro_credential_level or "not_specified",
+                "academic_stage": session.academic_stage,
+                "academic_guidance": session.academic_guidance,
             }
         )
         session.study_materials[competency] = material.raw
@@ -459,6 +467,9 @@ async def _setup_competency(session: LearnerSession):
                 "weak_areas": ", ".join(session.weak_areas) or "none",
                 "context_description": context_description,
                 "interaction_budget": BASE_LEARNING_INTERACTIONS,
+                "remote_micro_credential_level": session.remote_micro_credential_level or "not_specified",
+                "academic_stage": session.academic_stage,
+                "academic_guidance": session.academic_guidance,
             }
         )
         session.learning_plans[competency] = plan.raw
@@ -625,6 +636,34 @@ def _parse_formative_prompt(ai_response: str) -> str:
     return ai_response.strip()
 
 
+def _alternate_delivery_mode(current_mode: str | None) -> str:
+    modes = [
+        "analogy",
+        "step_by_step",
+        "comparison_table",
+        "worked_example",
+        "mini_challenge",
+        "error_clinic",
+    ]
+    if current_mode not in modes:
+        return modes[0]
+    index = modes.index(current_mode)
+    return modes[(index + 1) % len(modes)]
+
+
+def _is_repeated_explanation(session: LearnerSession, ai_response: str) -> bool:
+    last_assistant = next((msg for msg in reversed(session.messages[:-1]) if msg.role == "assistant"), None)
+    if last_assistant is None:
+        return False
+    current = re.sub(r"\s+", " ", ai_response.strip().lower())
+    previous = re.sub(r"\s+", " ", last_assistant.content.strip().lower())
+    if not current or not previous:
+        return False
+    if current == previous:
+        return True
+    return SequenceMatcher(a=current[:1200], b=previous[:1200]).ratio() >= 0.9
+
+
 def _generate_assessment_prompt(session: LearnerSession) -> str:
     competency = session.current_competency
     details = _get_competency_details(session, competency)
@@ -730,34 +769,49 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
     personalization = _build_personalization_state(session)
     include_formative = _should_ask_formative_check(session)
 
-    result = TutorCrew().crew().kickoff(
-        inputs={
-            "topic": session.topic,
-            "competency": competency_label,
-            "user_level": session.user_level,
-            "weak_areas": ", ".join(session.weak_areas) or "none",
-            "chat_history": session.format_recent_history(),
-            "user_message": user_message,
-            "turn_number": session.learning_turn,
-            "interaction_number": session.competency_interaction,
-            "current_subpart": current_subpart,
-            "subpart_index": session.current_subpart_index + 1,
-            "total_subparts": len(session.competency_subparts.get(competency, [])),
-            "study_material": session.study_materials.get(competency, ""),
-            "chat_stage": session.chat_stage,
-            "bloom_level": session.bloom_level,
-            "competency_is_technical": "yes" if _is_technical_competency(competency) else "no",
-            "formative_feedback": formative_feedback or "No formative feedback yet for this turn.",
-            "delivery_mode": personalization["delivery_mode"],
-            "difficulty_tier": personalization["difficulty_tier"],
-            "support_style": personalization["support_style"],
-            "feedback_style": personalization["feedback_style"],
-            "interaction_goal": _interaction_goal(session),
-            "include_formative_check": "yes" if include_formative else "no",
-            "revision_required": "yes" if session.revision_required else "no",
-        }
-    )
-    ai_response = result.raw.strip()
+    def _kickoff(delivery_mode: str, anti_repeat_instruction: str = "") -> str:
+        result = TutorCrew().crew().kickoff(
+            inputs={
+                "topic": session.topic,
+                "competency": competency_label,
+                "user_level": session.user_level,
+                "weak_areas": ", ".join(session.weak_areas) or "none",
+                "chat_history": session.format_recent_history(),
+                "user_message": user_message,
+                "turn_number": session.learning_turn,
+                "interaction_number": session.competency_interaction,
+                "current_subpart": current_subpart,
+                "subpart_index": session.current_subpart_index + 1,
+                "total_subparts": len(session.competency_subparts.get(competency, [])),
+                "study_material": session.study_materials.get(competency, ""),
+                "chat_stage": session.chat_stage,
+                "bloom_level": session.bloom_level,
+                "competency_is_technical": "yes" if _is_technical_competency(competency) else "no",
+                "remote_micro_credential_level": session.remote_micro_credential_level or "not_specified",
+                "academic_stage": session.academic_stage,
+                "academic_guidance": personalization["academic_guidance"],
+                "formative_feedback": formative_feedback or "No formative feedback yet for this turn.",
+                "delivery_mode": delivery_mode,
+                "difficulty_tier": personalization["difficulty_tier"],
+                "support_style": personalization["support_style"],
+                "feedback_style": personalization["feedback_style"],
+                "interaction_goal": _interaction_goal(session),
+                "include_formative_check": "yes" if include_formative else "no",
+                "revision_required": "yes" if session.revision_required else "no",
+                "anti_repeat_instruction": anti_repeat_instruction or "Do not repeat the previous explanation verbatim.",
+            }
+        )
+        return result.raw.strip()
+
+    ai_response = _kickoff(personalization["delivery_mode"])
+    if _is_repeated_explanation(session, ai_response):
+        alternate_mode = _alternate_delivery_mode(personalization["delivery_mode"])
+        personalization["delivery_mode"] = alternate_mode
+        session.personalization_state["delivery_mode"] = alternate_mode
+        ai_response = _kickoff(
+            alternate_mode,
+            anti_repeat_instruction="Use a different explanatory approach, different structure, and different example from the previous assistant message.",
+        )
     session.add_message("assistant", ai_response)
     interaction_type = "revision" if session.revision_required and session.learning_turn > BASE_LEARNING_INTERACTIONS else "teach"
 
@@ -1034,6 +1088,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
         "bloom_level": session.bloom_level,
         "is_doubt_phase": session.is_doubt_phase,
         "awaiting_formative_response": session.awaiting_formative_response,
+        "current_formative_prompt": session.current_formative_prompt,
         "revision_required": session.revision_required,
         "formative_check_results": session.formative_check_results,
         "message": ai_response,
@@ -1071,6 +1126,8 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     rubric_key = rubric.get("rubric_key") or competency
     rubric_version = get_rubric_version(competency)
     rubric_hash = rubric.get("source_hash")
+    remote_competency_id = session.current_remote_competency_id
+    remote_micro_credential_id = session.remote_micro_credential_id
 
     remote_learning_session_id = _ensure_remote_learning_session(session, competency)
     if remote_learning_session_id:
@@ -1099,6 +1156,16 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
             rubric_key=rubric_key,
             evaluation={**normalized, "rubric_version": rubric_version, "rubric_source_hash": rubric_hash},
         )
+        if session.learner_id and remote_micro_credential_id and remote_competency_id:
+            upsert_learner_competency_progress(
+                session.learner_id,
+                int(remote_micro_credential_id),
+                int(remote_competency_id),
+                competency,
+                passed=True,
+                latest_session_id=session.session_id,
+                latest_score=overall,
+            )
         session.completed_competencies.append(
             CompetencyResult(
                 competency=competency,
@@ -1185,6 +1252,16 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         rubric_key=rubric_key,
         evaluation={**normalized, "rubric_version": rubric_version, "rubric_source_hash": rubric_hash},
     )
+    if session.learner_id and remote_micro_credential_id and remote_competency_id:
+        upsert_learner_competency_progress(
+            session.learner_id,
+            int(remote_micro_credential_id),
+            int(remote_competency_id),
+            competency,
+            passed=False,
+            latest_session_id=session.session_id,
+            latest_score=overall,
+        )
     session.competency_attempts[competency] = session.competency_attempt_number + 1
     _reset_learning_after_assessment_fail(session)
     session.learning_turn = 1

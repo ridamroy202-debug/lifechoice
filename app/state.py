@@ -152,6 +152,47 @@ class LearnerSession(BaseModel):
         return int(remote_id) if isinstance(remote_id, int) else remote_id
 
     @property
+    def eqf_band(self) -> Optional[int]:
+        raw = (self.remote_micro_credential_level or "").upper()
+        if not raw:
+            return None
+        for token in raw.replace("-", " ").split():
+            if token.isdigit():
+                return int(token)
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        return int(digits) if digits else None
+
+    @property
+    def academic_stage(self) -> str:
+        mapping = {
+            6: "bachelor",
+            7: "masters",
+            8: "phd",
+        }
+        return mapping.get(self.eqf_band or -1, "professional")
+
+    @property
+    def academic_guidance(self) -> str:
+        guidance = {
+            "bachelor": (
+                "Use bachelor-level teaching depth: strong conceptual grounding, clear mechanisms, "
+                "scaffolded examples, and professional application without assuming research specialization."
+            ),
+            "masters": (
+                "Use masters-level teaching depth: expect stronger prior knowledge, analyze tradeoffs, "
+                "justify design choices, and connect concepts to professional decision-making."
+            ),
+            "phd": (
+                "Use PhD-level teaching depth: emphasize advanced reasoning, edge cases, limitations, "
+                "research-style critique, and expert synthesis across complex scenarios."
+            ),
+            "professional": (
+                "Use professional micro-credential depth: practical, rigorous, and clearly structured for workplace application."
+            ),
+        }
+        return guidance[self.academic_stage]
+
+    @property
     def chat_stage(self) -> str:
         stage, _ = _get_stage_info(self.learning_turn)
         return stage

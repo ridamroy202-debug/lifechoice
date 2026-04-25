@@ -21,12 +21,18 @@ from app.orchestrator import (
 )
 from app.persistence import (
     append_event_log,
+    create_remote_learning_session_ref,
     get_locked_rubric,
+    get_learner_competency_progress,
+    get_remote_learning_session_ref,
     get_unresolved_anomalies,
     list_badges,
+    list_learner_competency_progress,
     missing_locked_rubrics,
     seed_locked_rubrics_from_yaml,
+    update_remote_learning_session_ref,
     upsert_learner,
+    upsert_learner_competency_progress,
     upsert_locked_rubric,
 )
 from app.policy import build_gamification_payload, build_session_runtime_payload
@@ -138,13 +144,32 @@ class BackendLoginRequest(BaseModel):
     password: str
 
 
+class BackendProfileRequest(BaseModel):
+    micro_credential_id: int
+    domain_id: Optional[int] = None
+    auth_token: Optional[str] = None
+
+
+class BackendLessonCompetenciesRequest(BaseModel):
+    micro_credential_id: int
+    domain_id: Optional[int] = None
+    competency_id: Optional[int] = None
+
+
+class BackendEnrollmentAccessRequest(BaseModel):
+    micro_credential_id: int
+    auth_token: Optional[str] = None
+
+
 class CertificateGenerateRequest(BaseModel):
     session_id: str
     auth_token: Optional[str] = None
 
 
 class BackendLearningSessionStartRequest(BaseModel):
+    micro_credential_id: int
     competency_id: int
+    domain_id: Optional[int] = None
     auth_token: Optional[str] = None
 
 
@@ -211,6 +236,63 @@ def _extract_remote_catalog(payload: dict, domain_id: int, micro_credential_id: 
     if micro_entry is None:
         raise HTTPException(status_code=404, detail="Remote micro-credential not found")
     return domain_entry, micro_entry
+
+
+def _resolve_remote_catalog(
+    *,
+    micro_credential_id: int,
+    domain_id: Optional[int] = None,
+) -> tuple[dict, dict, dict]:
+    try:
+        payload = remote_backend_client.fetch_lesson_competencies(
+            domain_id=domain_id,
+            micro_credential_id=micro_credential_id,
+        )
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    domains = payload.get("data", {}).get("domains", [])
+    if not domains:
+        raise HTTPException(status_code=404, detail="Remote lesson catalog did not return any domains.")
+
+    if domain_id is not None:
+        domain_entry, micro_entry = _extract_remote_catalog(payload, domain_id, micro_credential_id)
+        return payload, domain_entry, micro_entry
+
+    for domain_entry in domains:
+        for micro_entry in domain_entry.get("micro_credentials", []):
+            if int(micro_entry.get("id", -1)) == int(micro_credential_id):
+                return payload, domain_entry, micro_entry
+    raise HTTPException(status_code=404, detail="Remote micro-credential not found")
+
+
+def _resolve_effective_token(auth_token: Optional[str]) -> str:
+    token = auth_token or remote_backend_client.default_token or None
+    if not token:
+        raise HTTPException(status_code=400, detail="auth_token is required.")
+    return token
+
+
+def _extract_profile_root(profile_payload: dict[str, Any]) -> dict[str, Any]:
+    profile = profile_payload.get("profile")
+    if isinstance(profile, dict):
+        return profile
+    data = profile_payload.get("data")
+    if isinstance(data, dict):
+        return data
+    return profile_payload
+
+
+def _extract_learner_id(profile_payload: dict[str, Any]) -> str:
+    profile_root = _extract_profile_root(profile_payload)
+    learner_id = str(profile_root.get("id") or profile_root.get("user_id") or "").strip()
+    if not learner_id:
+        raise HTTPException(status_code=400, detail="Could not determine learner identity from the authenticated profile.")
+    return learner_id
+
+
+def _ordered_competencies(micro_entry: dict[str, Any]) -> list[dict[str, Any]]:
+    return sorted(micro_entry.get("competencies", []), key=lambda item: int(item.get("code") or 9999))
 
 
 def _public_base_url(request: Request) -> str:
@@ -287,7 +369,7 @@ def start_session(req: StartSessionRequest):
                 },
             )
 
-        profile_root = profile_payload.get("data") if isinstance(profile_payload.get("data"), dict) else profile_payload
+        profile_root = _extract_profile_root(profile_payload)
         profile_id = str(profile_root.get("id") or profile_root.get("user_id") or "").strip()
         if req.learner_id and profile_id and str(req.learner_id) != profile_id:
             _log_event(None, req.learner_id, "/session/start", "identity_mismatch", {"provided_learner_id": req.learner_id, "profile_id": profile_id})
@@ -349,6 +431,8 @@ def start_session(req: StartSessionRequest):
             "source": session.source,
             "domain_id": session.domain_id,
             "micro_credential_id": session.remote_micro_credential_id,
+            "remote_micro_credential_level": session.remote_micro_credential_level,
+            "academic_stage": session.academic_stage,
             "remote_access_id": session.remote_access_id,
             "backend_warnings": session.backend_warnings,
             "current_competency": session.current_competency,
@@ -416,9 +500,35 @@ def backend_login(req: BackendLoginRequest):
     return payload
 
 
+@app.post("/backend/auth/profile/me", summary="Fetch learner profile with micro-credential context", tags=["Remote Backend"])
+def backend_profile_me(req: BackendProfileRequest):
+    effective_token = _resolve_effective_token(req.auth_token)
+    try:
+        payload = remote_backend_client.fetch_profile(token=effective_token)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    _, domain_entry, micro_entry = _resolve_remote_catalog(
+        micro_credential_id=req.micro_credential_id,
+        domain_id=req.domain_id,
+    )
+    competencies = _ordered_competencies(micro_entry)
+    return {
+        "profile": payload,
+        "micro_credential": {
+            "id": int(micro_entry.get("id", req.micro_credential_id)),
+            "title": micro_entry.get("micro_credential") or micro_entry.get("name"),
+            "domain_id": int(domain_entry.get("id", 0)),
+            "domain_name": domain_entry.get("domain"),
+            "level": micro_entry.get("level"),
+            "competency_count": len(competencies),
+        },
+        "competencies": competencies,
+    }
+
+
 @app.get("/backend/auth/profile/me", summary="Proxy learner profile from the remote backend", tags=["Remote Backend"])
-def backend_profile_me(auth_token: Optional[str] = Query(None)):
-    effective_token = auth_token or remote_backend_client.default_token or None
+def backend_profile_me_get(auth_token: Optional[str] = Query(None)):
+    effective_token = _resolve_effective_token(auth_token)
     try:
         payload = remote_backend_client.fetch_profile(token=effective_token)
     except RemoteBackendError as exc:
@@ -432,18 +542,43 @@ def backend_profile_me(auth_token: Optional[str] = Query(None)):
     tags=["Remote Backend"],
 )
 def backend_lesson_competencies(
-    domain_id: int = Query(...),
     micro_credential_id: int = Query(...),
+    domain_id: int | None = Query(None),
     competency_id: int | None = Query(None),
 ):
-    try:
-        payload = remote_backend_client.fetch_lesson_competencies(
-            domain_id=domain_id,
-            micro_credential_id=micro_credential_id,
-            competency_id=competency_id,
-        )
-    except RemoteBackendError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    payload, _, _ = _resolve_remote_catalog(
+        micro_credential_id=micro_credential_id,
+        domain_id=domain_id,
+    )
+    if competency_id is not None:
+        domains = payload.get("data", {}).get("domains", [])
+        for domain_entry in domains:
+            for micro_entry in domain_entry.get("micro_credentials", []):
+                if int(micro_entry.get("id", -1)) != int(micro_credential_id):
+                    continue
+                filtered = [item for item in micro_entry.get("competencies", []) if int(item.get("id", -1)) == int(competency_id)]
+                micro_entry["competencies"] = filtered
+    return payload
+
+
+@app.post(
+    "/backend/lesson/competencies",
+    summary="Proxy lesson competencies from the remote backend using a request body",
+    tags=["Remote Backend"],
+)
+def backend_lesson_competencies_post(req: BackendLessonCompetenciesRequest):
+    payload, _, _ = _resolve_remote_catalog(
+        micro_credential_id=req.micro_credential_id,
+        domain_id=req.domain_id,
+    )
+    if req.competency_id is not None:
+        domains = payload.get("data", {}).get("domains", [])
+        for domain_entry in domains:
+            for micro_entry in domain_entry.get("micro_credentials", []):
+                if int(micro_entry.get("id", -1)) != int(req.micro_credential_id):
+                    continue
+                filtered = [item for item in micro_entry.get("competencies", []) if int(item.get("id", -1)) == int(req.competency_id)]
+                micro_entry["competencies"] = filtered
     return payload
 
 
@@ -468,9 +603,23 @@ def backend_lesson_rubric(competency_id: int):
     tags=["Remote Backend"],
 )
 def backend_enrollment_check_access(mc_id: int, auth_token: Optional[str] = Query(None)):
-    effective_token = auth_token or remote_backend_client.default_token or None
+    effective_token = _resolve_effective_token(auth_token)
     try:
         payload = remote_backend_client.check_access(mc_id, token=effective_token)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return payload
+
+
+@app.post(
+    "/backend/enrollment/check-access",
+    summary="Proxy enrollment access check from the remote backend using a request body",
+    tags=["Remote Backend"],
+)
+def backend_enrollment_check_access_post(req: BackendEnrollmentAccessRequest):
+    effective_token = _resolve_effective_token(req.auth_token)
+    try:
+        payload = remote_backend_client.check_access(req.micro_credential_id, token=effective_token)
     except RemoteBackendError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return payload
@@ -482,7 +631,47 @@ def backend_enrollment_check_access(mc_id: int, auth_token: Optional[str] = Quer
     tags=["Remote Backend"],
 )
 def backend_learning_session_start(req: BackendLearningSessionStartRequest):
-    effective_token = req.auth_token or remote_backend_client.default_token or None
+    effective_token = _resolve_effective_token(req.auth_token)
+    try:
+        profile_payload = remote_backend_client.fetch_profile(token=effective_token)
+        access_payload = remote_backend_client.check_access(req.micro_credential_id, token=effective_token)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    profile_root = _extract_profile_root(profile_payload)
+    learner_id = _extract_learner_id(profile_payload)
+    access_data = access_payload.get("access", {})
+    if not bool(access_data.get("can_access", access_data.get("can_start_session", False))):
+        raise HTTPException(status_code=403, detail=access_data.get("message") or "Remote backend denied access")
+
+    _, domain_entry, micro_entry = _resolve_remote_catalog(
+        micro_credential_id=req.micro_credential_id,
+        domain_id=req.domain_id,
+    )
+    ordered_competencies = _ordered_competencies(micro_entry)
+    target_index = next((idx for idx, item in enumerate(ordered_competencies) if int(item.get("id", -1)) == int(req.competency_id)), None)
+    if target_index is None:
+        raise HTTPException(status_code=404, detail="Requested competency does not belong to the selected micro-credential.")
+
+    blocking_competencies: list[dict[str, Any]] = []
+    for item in ordered_competencies[:target_index]:
+        progress = get_learner_competency_progress(learner_id, req.micro_credential_id, int(item.get("id", -1)))
+        if not progress or not bool(progress.get("passed")):
+            blocking_competencies.append(
+                {
+                    "id": int(item.get("id", -1)),
+                    "code": item.get("code"),
+                    "title": item.get("title"),
+                }
+            )
+    if blocking_competencies:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Previous competencies must be passed before starting this learning session.",
+                "blocking_competencies": blocking_competencies,
+            },
+        )
+
     try:
         payload = remote_backend_client.start_learning_session(
             competency_id=req.competency_id,
@@ -490,7 +679,35 @@ def backend_learning_session_start(req: BackendLearningSessionStartRequest):
         )
     except RemoteBackendError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return payload
+
+    session_payload = payload.get("session") if isinstance(payload.get("session"), dict) else payload
+    remote_session_id = int(session_payload.get("id") or session_payload.get("session_id") or 0)
+    if not remote_session_id:
+        raise HTTPException(status_code=502, detail="Remote backend did not return a learning session id.")
+    target_competency = ordered_competencies[target_index]
+    create_remote_learning_session_ref(
+        remote_session_id,
+        learner_id,
+        req.micro_credential_id,
+        req.competency_id,
+        str(target_competency.get("title") or req.competency_id),
+        domain_id=int(domain_entry.get("id", 0)) if domain_entry.get("id") is not None else req.domain_id,
+    )
+    return {
+        "profile": profile_payload,
+        "access": access_payload,
+        "micro_credential": {
+            "id": int(micro_entry.get("id", req.micro_credential_id)),
+            "title": micro_entry.get("micro_credential") or micro_entry.get("name"),
+            "domain_id": int(domain_entry.get("id", 0)),
+            "domain_name": domain_entry.get("domain"),
+        },
+        "current_competency": target_competency,
+        "previous_competencies_passed": True,
+        "learning_session": payload,
+        "learner_id": learner_id,
+        "identity_verified": bool(profile_root.get("id") or profile_root.get("user_id")),
+    }
 
 
 @app.get(
@@ -499,12 +716,13 @@ def backend_learning_session_start(req: BackendLearningSessionStartRequest):
     tags=["Remote Backend"],
 )
 def backend_learning_session_detail(session_id: int, auth_token: Optional[str] = Query(None)):
-    effective_token = auth_token or remote_backend_client.default_token or None
+    effective_token = _resolve_effective_token(auth_token)
     try:
         payload = remote_backend_client.fetch_learning_session(session_id, token=effective_token)
     except RemoteBackendError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return payload
+    local_state = get_remote_learning_session_ref(session_id)
+    return {"remote": payload, "local": local_state}
 
 
 @app.post(
@@ -535,7 +753,7 @@ def backend_learning_session_interact(session_id: int, req: BackendLearningInter
     tags=["Remote Backend"],
 )
 def backend_learning_session_assess(session_id: int, req: BackendLearningAssessmentRequest):
-    effective_token = req.auth_token or remote_backend_client.default_token or None
+    effective_token = _resolve_effective_token(req.auth_token)
     try:
         payload = remote_backend_client.submit_assessment(
             session_id=session_id,
@@ -547,6 +765,23 @@ def backend_learning_session_assess(session_id: int, req: BackendLearningAssessm
         )
     except RemoteBackendError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    passed = bool(payload.get("pass", payload.get("passed", req.rubric_score >= 75.0)))
+    local_state = get_remote_learning_session_ref(session_id)
+    if local_state:
+        update_remote_learning_session_ref(
+            session_id,
+            status="passed" if passed else "failed",
+            latest_score=req.rubric_score,
+        )
+        upsert_learner_competency_progress(
+            local_state["learner_id"],
+            local_state["micro_credential_id"],
+            local_state["competency_id"],
+            local_state["competency_name"],
+            passed=passed,
+            latest_session_id=str(session_id),
+            latest_score=req.rubric_score,
+        )
     return payload
 
 
@@ -556,12 +791,91 @@ def backend_learning_session_assess(session_id: int, req: BackendLearningAssessm
     tags=["Remote Backend"],
 )
 def backend_gamification_progress(session_id: int, auth_token: Optional[str] = Query(None)):
-    effective_token = auth_token or remote_backend_client.default_token or None
+    effective_token = _resolve_effective_token(auth_token)
     try:
         payload = remote_backend_client.fetch_gamification_progress(session_id, token=effective_token)
     except RemoteBackendError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return payload
+
+
+@app.get(
+    "/backend/learner/micro-credential/progress",
+    summary="Get learner progress for one micro-credential from the AI engine database",
+    tags=["Remote Backend"],
+)
+def backend_learner_micro_credential_progress(
+    micro_credential_id: int = Query(...),
+    domain_id: int | None = Query(None),
+    auth_token: Optional[str] = Query(None),
+):
+    effective_token = _resolve_effective_token(auth_token)
+    try:
+        profile_payload = remote_backend_client.fetch_profile(token=effective_token)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    learner_id = _extract_learner_id(profile_payload)
+    _, domain_entry, micro_entry = _resolve_remote_catalog(
+        micro_credential_id=micro_credential_id,
+        domain_id=domain_id,
+    )
+    ordered_competencies = _ordered_competencies(micro_entry)
+    progress_map = {
+        int(item["competency_id"]): item
+        for item in list_learner_competency_progress(learner_id, micro_credential_id)
+    }
+    completed_count = 0
+    next_competency_id: int | None = None
+    previous_passed = True
+    competency_items: list[dict[str, Any]] = []
+    for index, competency in enumerate(ordered_competencies, start=1):
+        competency_id = int(competency.get("id", -1))
+        progress = progress_map.get(competency_id)
+        passed = bool(progress and progress.get("passed"))
+        if passed:
+            status = "passed"
+            availability = "completed"
+            completed_count += 1
+        else:
+            status = "not_started" if progress is None else "failed"
+            availability = "available" if previous_passed and next_competency_id is None else ("blocked" if not previous_passed else "available")
+            if availability == "available" and next_competency_id is None:
+                next_competency_id = competency_id
+        competency_items.append(
+            {
+                "sequence": index,
+                "competency_id": competency_id,
+                "code": competency.get("code"),
+                "title": competency.get("title"),
+                "status": status,
+                "availability": availability,
+                "passed": passed,
+                "latest_score": progress.get("latest_score") if progress else None,
+                "latest_session_id": progress.get("latest_session_id") if progress else None,
+                "updated_at": progress.get("updated_at") if progress else None,
+            }
+        )
+        previous_passed = previous_passed and passed
+    total = len(ordered_competencies)
+    progress_percent = round((completed_count / total) * 100, 2) if total else 0.0
+    return {
+        "profile": profile_payload,
+        "micro_credential": {
+            "id": int(micro_entry.get("id", micro_credential_id)),
+            "title": micro_entry.get("micro_credential") or micro_entry.get("name"),
+            "domain_id": int(domain_entry.get("id", 0)),
+            "domain_name": domain_entry.get("domain"),
+            "total_competencies": total,
+        },
+        "progress": {
+            "completed_competencies": completed_count,
+            "total_competencies": total,
+            "progress_percent": progress_percent,
+            "next_available_competency_id": next_competency_id,
+            "all_competencies_passed": total > 0 and completed_count == total,
+        },
+        "competencies": competency_items,
+    }
 
 
 @app.get(
@@ -798,6 +1112,8 @@ def get_session_status(session_id: str):
         "domain_id": session.domain_id,
         "remote_micro_credential_id": session.remote_micro_credential_id,
         "remote_micro_credential_level": session.remote_micro_credential_level,
+        "academic_stage": session.academic_stage,
+        "academic_guidance": session.academic_guidance,
         "remote_access_id": session.remote_access_id,
         "identity_verified": session.identity_verified,
         "identity_verified_at": session.identity_verified_at,
@@ -815,6 +1131,7 @@ def get_session_status(session_id: str):
         "current_difficulty": session.current_difficulty,
         "formative_check_results": session.formative_check_results,
         "awaiting_formative_response": session.awaiting_formative_response,
+        "current_formative_prompt": session.current_formative_prompt,
         "revision_required": session.revision_required,
         "final_assessment_unlocked": session.final_assessment_unlocked,
         "current_assessment_attempts": session.current_assessment_attempts,
@@ -822,6 +1139,7 @@ def get_session_status(session_id: str):
         "final_assessment_prompt": session.final_assessment_prompt,
         "final_assessment_attempts": session.final_assessment_attempts,
         "personalization_state": session.personalization_state,
+        "competency": session.current_competency,
         "current_competency": session.current_competency,
         "current_remote_competency_id": session.current_remote_competency_id,
         "current_remote_learning_session_id": session.current_remote_learning_session_id,

@@ -47,8 +47,11 @@ learning_path_planner_task:
     - Topic: {topic}
     - Competency: {competency}
     - Learner level: {user_level}
+    - EQF level: {remote_micro_credential_level}
+    - Academic stage: {academic_stage}
     - Weak areas: {weak_areas}
     - Context notes: {context_description}
+    - Academic guidance: {academic_guidance}
 
     Build exactly 6 teaching parts for interactions 3-8.
     Each part must teach one concept only.
@@ -65,6 +68,10 @@ learning_path_planner_task:
     - Each item must be under 45 words
     - Each item must be scenario-based and applied
     - Each item must be meaningfully different
+    - Match the explanation depth to the academic stage:
+      bachelor = strong foundations and applied understanding
+      masters = stronger tradeoff analysis and justified decisions
+      phd = advanced critique, edge cases, and research-style rigor
     - Output as a numbered list
   expected_output: >
     A numbered list of exactly 6 teaching parts, one concept per part.
@@ -75,6 +82,9 @@ senario_generation_task:
     - Topic: {topic}
     - Competency: {competency}
     - Learner level: {user_level}
+    - EQF level: {remote_micro_credential_level}
+    - Academic stage: {academic_stage}
+    - Academic guidance: {academic_guidance}
 
     ════════════════════════════════════════════════════════════════
     QUALITY STANDARD
@@ -83,6 +93,10 @@ senario_generation_task:
     It must go DEEPER than a Wikipedia article or generic blog post.
     Focus on HOW things work (mechanisms), WHEN to use them (decision
     frameworks), and WHAT goes wrong (failure patterns).
+    Match the academic depth to the EQF stage:
+    - EQF 6 / bachelor: teach strong foundations, mechanisms, and applied execution
+    - EQF 7 / masters: emphasize decision quality, tradeoffs, and strategic justification
+    - EQF 8 / phd: emphasize expert critique, limitations, edge cases, and advanced synthesis
 
     DO NOT fabricate statistics, company names, or research citations.
     Instead, focus on explaining mechanisms, processes, and principles
@@ -178,6 +192,9 @@ ai_tutor_task:
     - Teaching stage: {chat_stage}
     - Bloom level: {bloom_level}
     - Technical competency: {competency_is_technical}
+    - EQF level: {remote_micro_credential_level}
+    - Academic stage: {academic_stage}
+    - Academic guidance: {academic_guidance}
     - Delivery mode: {delivery_mode}
     - Difficulty tier: {difficulty_tier}
     - Support style: {support_style}
@@ -202,6 +219,10 @@ ai_tutor_task:
     - Teach exactly one concept in this interaction
     - Be warm, appreciative, and direct
     - Keep the teaching personalized to the learner's current difficulty tier
+    - Match the intellectual depth to the academic stage:
+      bachelor = scaffold clearly and connect theory to practice
+      masters = expect stronger reasoning and defend choices explicitly
+      phd = include critique, limitations, edge cases, and expert synthesis
     - Give immediate feedback if formative_feedback contains assessment of the learner answer
     - Use markdown headings and bullets
     - Use at least one multimodal teaching artifact: table, steps, comparison, worked example, mini scenario, or formula walkthrough

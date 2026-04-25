@@ -51,12 +51,23 @@ class RemoteBackendClient:
         if allow_404 and response.status_code == 404:
             return {}
         if response.status_code >= 400:
+            detail = response.text
+            if len(detail) > 800:
+                detail = f"{detail[:800]}...[truncated]"
             raise RemoteBackendError(
-                f"Remote backend request failed {response.status_code} for {path}: {response.text}"
+                f"Remote backend request failed {response.status_code} for {path}: {detail}"
             )
         if not response.content:
             return {}
         return response.json()
+
+    @staticmethod
+    def _unwrap_payload(payload: dict[str, Any], *keys: str) -> dict[str, Any]:
+        for key in keys:
+            candidate = payload.get(key)
+            if isinstance(candidate, dict):
+                return candidate
+        return payload
 
     def login(self, email: str, password: str) -> dict[str, Any]:
         return self._request(
@@ -77,14 +88,15 @@ class RemoteBackendClient:
     def fetch_lesson_competencies(
         self,
         *,
-        domain_id: int,
-        micro_credential_id: int,
+        domain_id: int | None = None,
+        micro_credential_id: int | None = None,
         competency_id: int | None = None,
     ) -> dict[str, Any]:
-        params: dict[str, Any] = {
-            "domain_id": domain_id,
-            "micro_credential_id": micro_credential_id,
-        }
+        params: dict[str, Any] = {}
+        if domain_id is not None:
+            params["domain_id"] = domain_id
+        if micro_credential_id is not None:
+            params["micro_credential_id"] = micro_credential_id
         if competency_id is not None:
             params["competency_id"] = competency_id
         return self._request("GET", "/lesson/competencies/", params=params)

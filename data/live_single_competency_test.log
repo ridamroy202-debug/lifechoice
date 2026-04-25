@@ -1,0 +1,12 @@
+session_id=9fbe1882-1e01-484c-800b-3e04250d736f
+current_competency=Write structured prompts
++------------------------- Trace Batch Finalization --------------------------+
+| +------------------------- Trace Batch Finalization --------------------------+
+| phase_after_preassessment=learning
+learn_turn=4 phase=learning awaiting_formative=True ready_for_assessment=False
+learn_turn=5 phase=learning awaiting_formative=False ready_for_assessment=False
+learn_turn=6 phase=learning awaiting_formative=True ready_for_assessment=False
+learn_turn=7 phase=learning awaiting_formative=False ready_for_assessment=False
+learn_turn=8 phase=learning awaiting_formative=True ready_for_assessment=False
+learn_turn=9 phase=competency_assessment awaiting_formative=None ready_for_assessment=True
+assessment_result= 

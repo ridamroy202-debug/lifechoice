@@ -90,3 +90,70 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to EC2
+    needs: docker
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy latest image over SSH
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_APP_PORT: ${{ secrets.EC2_APP_PORT }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${EC2_HOST}" ] || [ -z "${EC2_USER}" ] || [ -z "${EC2_SSH_KEY}" ]; then
+            echo "Missing one or more required EC2 secrets: EC2_HOST, EC2_USER, EC2_SSH_KEY" >&2
+            exit 1
+          fi
+
+          SSH_PORT="${EC2_PORT:-22}"
+          APP_PORT="${EC2_APP_PORT:-8000}"
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "${EC2_SSH_KEY}" > ~/.ssh/lifechoice_ec2_key
+          chmod 600 ~/.ssh/lifechoice_ec2_key
+          ssh-keyscan -p "${SSH_PORT}" "${EC2_HOST}" >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/lifechoice_ec2_key -p "${SSH_PORT}" "${EC2_USER}@${EC2_HOST}" \
+            "DOCKERHUB_IMAGE='${DOCKERHUB_IMAGE}:latest' CONTAINER_NAME='${IMAGE_NAME}' APP_PORT='${APP_PORT}' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          ENV_FILE_ARG=""
+          if [ -f "$HOME/lifechoice-ai-engine.env" ]; then
+            ENV_FILE_ARG="--env-file $HOME/lifechoice-ai-engine.env"
+          fi
+
+          DOCKER="docker"
+          if ! docker ps >/dev/null 2>&1; then
+            DOCKER="sudo docker"
+          fi
+
+          $DOCKER pull "$DOCKERHUB_IMAGE"
+
+          $DOCKER stop "$CONTAINER_NAME" || true
+          $DOCKER rm "$CONTAINER_NAME" || true
+
+          $DOCKER volume create lifechoice-ai-engine-data >/dev/null
+          $DOCKER volume create lifechoice-ai-engine-certificates >/dev/null
+
+          $DOCKER run -d \
+            --name "$CONTAINER_NAME" \
+            --restart unless-stopped \
+            -p "$APP_PORT:8000" \
+            $ENV_FILE_ARG \
+            -v lifechoice-ai-engine-data:/app/data \
+            -v lifechoice-ai-engine-certificates:/app/generated_certificates \
+            "$DOCKERHUB_IMAGE"
+
+          sleep 5
+          curl --fail --silent --show-error "http://127.0.0.1:$APP_PORT/openapi.json" >/dev/null
+
+          $DOCKER image prune -f
+          REMOTE

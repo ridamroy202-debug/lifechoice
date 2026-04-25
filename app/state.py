@@ -164,12 +164,22 @@ class LearnerSession(BaseModel):
 
     @property
     def academic_stage(self) -> str:
+        raw = (self.remote_micro_credential_level or "").strip().lower()
         mapping = {
             6: "bachelor",
             7: "masters",
             8: "phd",
         }
-        return mapping.get(self.eqf_band or -1, "professional")
+        if self.eqf_band in mapping:
+            return mapping[self.eqf_band]
+        textual_mapping = {
+            "foundation": "bachelor",
+            "intermediate": "bachelor",
+            "advance": "masters",
+            "advanced": "masters",
+            "doctoral": "phd",
+        }
+        return textual_mapping.get(raw, "professional")
 
     @property
     def academic_guidance(self) -> str:

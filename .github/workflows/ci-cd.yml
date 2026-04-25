@@ -137,8 +137,10 @@ jobs:
 
           $DOCKER pull "$DOCKERHUB_IMAGE"
 
-          $DOCKER stop "$CONTAINER_NAME" || true
-          $DOCKER rm "$CONTAINER_NAME" || true
+          if $DOCKER ps -a --format '{{.Names}}' | grep -Fx "$CONTAINER_NAME" >/dev/null; then
+            $DOCKER stop "$CONTAINER_NAME" || true
+            $DOCKER rm "$CONTAINER_NAME" || true
+          fi
 
           $DOCKER volume create lifechoice-ai-engine-data >/dev/null
           $DOCKER volume create lifechoice-ai-engine-certificates >/dev/null
@@ -152,8 +154,27 @@ jobs:
             -v lifechoice-ai-engine-certificates:/app/generated_certificates \
             "$DOCKERHUB_IMAGE"
 
-          sleep 5
-          curl --fail --silent --show-error "http://127.0.0.1:$APP_PORT/openapi.json" >/dev/null
+          for attempt in $(seq 1 30); do
+            if [ "$($DOCKER inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" != "true" ]; then
+              echo "Container stopped before becoming healthy." >&2
+              $DOCKER logs "$CONTAINER_NAME" || true
+              exit 1
+            fi
+
+            if curl --fail --silent --show-error "http://127.0.0.1:$APP_PORT/openapi.json" >/dev/null; then
+              echo "Deployment health check passed."
+              break
+            fi
+
+            if [ "$attempt" -eq 30 ]; then
+              echo "Container did not become healthy after 60 seconds." >&2
+              $DOCKER ps -a --filter "name=$CONTAINER_NAME"
+              $DOCKER logs "$CONTAINER_NAME" || true
+              exit 1
+            fi
+
+            sleep 2
+          done
 
           $DOCKER image prune -f
           REMOTE

@@ -912,6 +912,19 @@ class RemoteBackendContractTests(unittest.TestCase):
 
 
 class EvaluationNormalizationTests(unittest.TestCase):
+    def test_safe_json_loads_extracts_fenced_json(self):
+        import app.orchestrator as orch
+
+        parsed = orch._safe_json_loads(
+            """```json
+            {"criteria_scores":[{"criterion_id":"c1","met":true,"evidence":"ok"}],"overall_percent":100.0,"pass":true,"summary":"ok"}
+            ```""",
+            {},
+        )
+
+        self.assertTrue(parsed["pass"])
+        self.assertEqual(len(parsed["criteria_scores"]), 1)
+
     def test_normalize_binary_evaluation_uses_positional_scores_when_ids_do_not_match(self):
         import app.orchestrator as orch
 
@@ -978,6 +991,17 @@ class EvaluationNormalizationTests(unittest.TestCase):
         self.assertTrue(heuristics["concrete_application"])
         self.assertTrue(heuristics["explanation_quality"])
         self.assertTrue(heuristics["pass"])
+
+    def test_formative_heuristics_handle_plural_mission_terms(self):
+        import app.orchestrator as orch
+
+        prompt = 'For a startup with the mission to "empower communities through eco-friendly initiatives," what key visual elements would you focus on, and how would they align with the mission statement?'
+        answer = (
+            "I would use community-centered imagery, a green and blue palette, approachable typography, and modular iconography because those elements make the brand feel inclusive, sustainable, and action-oriented."
+        )
+
+        heuristics = orch._build_formative_heuristics(prompt, answer, "Construct comprehensive brand identity systems")
+        self.assertTrue(heuristics["scenario_relevance"])
 
     def test_evaluate_formative_response_uses_heuristic_override_when_model_is_too_harsh(self):
         import app.orchestrator as orch

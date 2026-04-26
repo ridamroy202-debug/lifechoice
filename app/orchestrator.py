@@ -482,6 +482,11 @@ def _ensure_remote_learning_session(session: LearnerSession, competency: str) ->
 
 
 def _safe_json_loads(raw_text: str, fallback: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(raw_text, str):
+        stripped = raw_text.strip()
+        fenced_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", stripped, re.DOTALL | re.IGNORECASE)
+        if fenced_match:
+            raw_text = fenced_match.group(1)
     try:
         return json.loads(raw_text)
     except (json.JSONDecodeError, TypeError):
@@ -507,8 +512,17 @@ def _coerce_boolish(value: Any) -> bool | None:
     return None
 
 
+def _normalize_formative_token(token: str) -> str:
+    token = token.lower()
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"
+    if token.endswith("s") and len(token) > 4 and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
 def _tokenize_formative_text(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
+    return [_normalize_formative_token(token) for token in re.findall(r"[a-z0-9]+", text.lower())]
 
 
 def _extract_significant_prompt_terms(prompt: str) -> set[str]:
@@ -538,6 +552,8 @@ def _build_formative_heuristics(prompt: str, learner_answer: str, competency: st
     scenario_relevance = bool(mission_overlap) or len(shared_terms) >= 3
     explanation_quality = has_reasoning
     concrete_application = mentions_specific_elements if requires_visual_elements else bool(shared_terms) and has_reasoning
+    if not scenario_relevance and requires_visual_elements and concrete_application and explanation_quality:
+        scenario_relevance = True
 
     met_count = sum([scenario_relevance, concrete_application, explanation_quality])
     overall_percent = round((met_count / 3.0) * 100.0, 2)
@@ -859,6 +875,10 @@ def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -
         }
     )
     payload = _safe_json_loads(result.raw, {"criteria_scores": [], "overall_percent": 0.0, "pass": False, "summary": result.raw})
+    if not payload.get("criteria_scores") and isinstance(payload.get("summary"), str):
+        embedded = _safe_json_loads(payload["summary"], {})
+        if embedded.get("criteria_scores"):
+            payload = embedded
     normalized = _normalize_binary_evaluation(payload, rubric)
     heuristics = _build_formative_heuristics(prompt, learner_answer, session.current_competency)
     overall = float(normalized.get("overall_percent", 0.0) or 0.0)

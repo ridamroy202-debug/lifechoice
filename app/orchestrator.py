@@ -459,22 +459,57 @@ def _safe_json_loads(raw_text: str, fallback: dict[str, Any]) -> dict[str, Any]:
         return fallback
 
 
+def _normalize_eval_key(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _coerce_boolish(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    lowered = str(value).strip().lower()
+    if lowered in {"true", "yes", "y", "1", "met", "pass", "passed", "proficient"}:
+        return True
+    if lowered in {"false", "no", "n", "0", "not_met", "not met", "fail", "failed"}:
+        return False
+    return None
+
+
 def _normalize_binary_evaluation(evaluation: dict[str, Any], rubric: dict[str, Any]) -> dict[str, Any]:
     criteria = rubric.get("criteria", [])
     raw_scores = evaluation.get("criteria_scores") or []
     by_key: dict[str, dict[str, Any]] = {}
     for item in raw_scores:
-        key = str(item.get("criterion_id") or item.get("name") or "").strip().lower()
-        if key:
-            by_key[key] = item
+        for candidate_key in (
+            item.get("criterion_id"),
+            item.get("name"),
+            item.get("criterion"),
+            item.get("criterion_name"),
+        ):
+            key = _normalize_eval_key(candidate_key)
+            if key:
+                by_key[key] = item
 
     normalized_scores: list[dict[str, Any]] = []
     total = 0.0
+    matched_count = 0
     for index, criterion in enumerate(criteria, start=1):
         criterion_id = str(criterion.get("criterion_id") or f"c{index}")
         weight = float(criterion.get("weight", 0.0) or 0.0)
-        candidate = by_key.get(criterion_id.lower()) or by_key.get(str(criterion.get("name") or "").strip().lower(), {})
-        met_value = candidate.get("met")
+        candidate = (
+            by_key.get(_normalize_eval_key(criterion_id))
+            or by_key.get(_normalize_eval_key(criterion.get("name")))
+            or by_key.get(_normalize_eval_key(criterion.get("description")))
+        )
+        if candidate is None and len(raw_scores) == len(criteria):
+            candidate = raw_scores[index - 1]
+        candidate = candidate or {}
+        if candidate:
+            matched_count += 1
+        met_value = _coerce_boolish(candidate.get("met"))
         if met_value is None:
             raw_score = candidate.get("score") or candidate.get("value")
             if isinstance(raw_score, (int, float)):
@@ -483,7 +518,7 @@ def _normalize_binary_evaluation(evaluation: dict[str, Any], rubric: dict[str, A
                 label = str(candidate.get("rating") or candidate.get("assessment") or "").lower()
                 met = label in {"met", "pass", "passed", "proficient", "yes", "true"}
         else:
-            met = bool(met_value)
+            met = met_value
         evidence = str(candidate.get("evidence") or candidate.get("reason") or candidate.get("summary") or "").strip()
         normalized_scores.append({
             "criterion_id": criterion_id,
@@ -494,7 +529,23 @@ def _normalize_binary_evaluation(evaluation: dict[str, Any], rubric: dict[str, A
             total += weight * 100.0
 
     overall = round(total, 2)
+    raw_overall = evaluation.get("overall_percent")
+    try:
+        raw_overall_value = float(raw_overall)
+    except (TypeError, ValueError):
+        raw_overall_value = None
+    raw_pass_value = _coerce_boolish(evaluation.get("pass"))
+
+    if raw_overall_value is not None:
+        needs_fallback = matched_count == 0 or (
+            matched_count < max(1, len(criteria) // 2) and raw_overall_value >= PASS_THRESHOLD > overall
+        )
+        if needs_fallback:
+            overall = round(raw_overall_value, 2)
+
     passed = overall >= PASS_THRESHOLD
+    if raw_pass_value is not None and (matched_count == 0 or raw_pass_value):
+        passed = raw_pass_value if raw_overall_value is None else bool(raw_pass_value or overall >= PASS_THRESHOLD)
     return {
         "criteria_scores": normalized_scores,
         "overall_percent": overall,

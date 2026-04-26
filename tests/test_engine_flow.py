@@ -911,5 +911,58 @@ class RemoteBackendContractTests(unittest.TestCase):
         self.assertIn("[AI_ENGINE_FALLBACK]", calls[1]["json"]["ai_prompt"])
 
 
+class EvaluationNormalizationTests(unittest.TestCase):
+    def test_normalize_binary_evaluation_uses_positional_scores_when_ids_do_not_match(self):
+        import app.orchestrator as orch
+
+        rubric = {
+            "criteria": [
+                {"criterion_id": "formative_accuracy", "name": "Concept accuracy", "weight": 0.34},
+                {"criterion_id": "formative_application", "name": "Applied reasoning", "weight": 0.33},
+                {"criterion_id": "formative_explanation", "name": "Clear explanation", "weight": 0.33},
+            ]
+        }
+        evaluation = {
+            "criteria_scores": [
+                {"criterion_name": "Concept accuracy", "met": "true", "evidence": "Accurate"},
+                {"criterion_name": "Applied reasoning", "met": "true", "evidence": "Applied"},
+                {"criterion_name": "Clear explanation", "met": "true", "evidence": "Clear"},
+            ],
+            "overall_percent": 100.0,
+            "pass": True,
+            "summary": "Strong response.",
+        }
+
+        normalized = orch._normalize_binary_evaluation(evaluation, rubric)
+        self.assertEqual(normalized["overall_percent"], 100.0)
+        self.assertTrue(normalized["pass"])
+        self.assertEqual([item["met"] for item in normalized["criteria_scores"]], [True, True, True])
+
+    def test_normalize_binary_evaluation_falls_back_to_raw_overall_when_names_drift(self):
+        import app.orchestrator as orch
+
+        rubric = {
+            "criteria": [
+                {"criterion_id": "formative_accuracy", "name": "Concept accuracy", "weight": 0.34},
+                {"criterion_id": "formative_application", "name": "Applied reasoning", "weight": 0.33},
+                {"criterion_id": "formative_explanation", "name": "Clear explanation", "weight": 0.33},
+            ]
+        }
+        evaluation = {
+            "criteria_scores": [
+                {"criterion_name": "Accuracy of budgeting logic", "met": "yes", "evidence": "Strong"},
+                {"criterion_name": "Use of evidence in prioritization", "met": "yes", "evidence": "Applied"},
+                {"criterion_name": "Reasoning clarity", "met": "yes", "evidence": "Clear"},
+            ],
+            "overall_percent": 82.0,
+            "pass": True,
+            "summary": "Learner demonstrated solid applied reasoning.",
+        }
+
+        normalized = orch._normalize_binary_evaluation(evaluation, rubric)
+        self.assertGreaterEqual(normalized["overall_percent"], 82.0)
+        self.assertTrue(normalized["pass"])
+
+
 if __name__ == "__main__":
     unittest.main()

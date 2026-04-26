@@ -20,6 +20,7 @@ _ENV_KEYS_TO_NORMALIZE = (
     "REMOTE_BACKEND_URL",
     "REMOTE_API_TOKEN",
     "RUBRIC_ADMIN_KEY",
+    "CORS_ALLOWED_ORIGINS",
 )
 _ENV_LOADED = False
 _LOGGING_CONFIGURED = False
@@ -72,6 +73,15 @@ class Settings:
     remote_backend_url: str
     remote_api_token: str
     rubric_admin_key: str
+    cors_allowed_origins: tuple[str, ...]
+
+
+def env_list(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    raw = env_str(name, "")
+    if not raw:
+        return default
+    items = tuple(part.strip() for part in raw.split(",") if part.strip())
+    return items or default
 
 
 def get_settings() -> Settings:
@@ -88,6 +98,18 @@ def get_settings() -> Settings:
         remote_backend_url=env_str("REMOTE_BACKEND_URL", "https://lifechoice.duckdns.org").rstrip("/"),
         remote_api_token=env_str("REMOTE_API_TOKEN"),
         rubric_admin_key=env_str("RUBRIC_ADMIN_KEY"),
+        cors_allowed_origins=env_list(
+            "CORS_ALLOWED_ORIGINS",
+            (
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "http://54.151.241.98",
+                "https://www.ikonskills.ac",
+                "https://ikonskills.ac",
+            ),
+        ),
     )
 
 

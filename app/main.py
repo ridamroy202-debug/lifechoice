@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from typing import Any, List, Optional
 from app.session_manager import create_session, get_session
@@ -71,6 +72,14 @@ app = FastAPI(
     version="1.0.0",
     description="AI teaching engine connected to the remote LifeChoice backend for lesson context, rubrics, enrollment access, and learning session sync.",
     openapi_tags=openapi_tags,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(settings.cors_allowed_origins),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 configure_logging()

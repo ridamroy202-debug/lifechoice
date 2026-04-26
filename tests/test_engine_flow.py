@@ -384,6 +384,19 @@ class EngineFlowTests(unittest.TestCase):
             self.assertIn("/backend/gamification/progress/{session_id}", paths)
             self.assertIn("/backend/learner/micro-credential/progress", paths)
 
+    def test_cors_preflight_allows_local_frontend_origin(self):
+        with TestClient(self.app) as client:
+            response = client.options(
+                "/backend/learning/sessions/start",
+                headers={
+                    "Origin": "http://localhost:3000",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type,authorization",
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:3000")
+
     def test_remote_rubric_proxy_is_marked_unsupported(self):
         with TestClient(self.app) as client:
             response = client.get("/backend/lesson/rubric/61")

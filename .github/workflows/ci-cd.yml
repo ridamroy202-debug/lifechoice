@@ -125,10 +125,19 @@ jobs:
             "DOCKERHUB_IMAGE='${DOCKERHUB_IMAGE}:latest' CONTAINER_NAME='${IMAGE_NAME}' APP_PORT='${APP_PORT}' bash -s" <<'REMOTE'
           set -euo pipefail
 
-          ENV_FILE_ARG=""
-          if [ -f "$HOME/lifechoice-ai-engine.env" ]; then
-            ENV_FILE_ARG="--env-file $HOME/lifechoice-ai-engine.env"
+          ENV_FILE_PATH=""
+          if [ -f "$HOME/.env" ]; then
+            ENV_FILE_PATH="$HOME/.env"
+          elif [ -f "$HOME/lifechoice-ai-engine.env" ]; then
+            ENV_FILE_PATH="$HOME/lifechoice-ai-engine.env"
           fi
+
+          if [ -z "$ENV_FILE_PATH" ]; then
+            echo "No deployment env file found. Expected one of: $HOME/.env or $HOME/lifechoice-ai-engine.env" >&2
+            exit 1
+          fi
+
+          echo "Using deployment env file: $ENV_FILE_PATH"
 
           DOCKER="docker"
           if ! docker ps >/dev/null 2>&1; then
@@ -158,7 +167,7 @@ jobs:
             --name "$CONTAINER_NAME" \
             --restart unless-stopped \
             -p "$APP_PORT:8000" \
-            $ENV_FILE_ARG \
+            --env-file "$ENV_FILE_PATH" \
             -v lifechoice-ai-engine-data:/app/data \
             -v lifechoice-ai-engine-certificates:/app/generated_certificates \
             "$DOCKERHUB_IMAGE"

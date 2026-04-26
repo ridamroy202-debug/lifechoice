@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import json
 import os
 import re
@@ -67,6 +68,34 @@ REQUIRED_TUTOR_SECTIONS = (
 )
 
 _RUBRICS_CACHE: dict[str, Any] | None = None
+logger = logging.getLogger(__name__)
+_FORMATIVE_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "because", "by", "for", "from", "how",
+    "i", "if", "in", "into", "is", "it", "its", "of", "on", "or", "our", "so", "that",
+    "the", "their", "them", "they", "this", "to", "what", "when", "which", "why", "with",
+    "would", "you", "your", "startup", "mission", "statement", "focus", "align", "aligned",
+    "develop", "developing", "key", "elements", "visual", "identity", "brand", "question",
+    "through",
+}
+_FORMATIVE_REASONING_MARKERS = (
+    "because",
+    "so that",
+    "which helps",
+    "this helps",
+    "this supports",
+    "this aligns",
+    "therefore",
+    "so the",
+    "ensures",
+    "to show",
+    "to signal",
+)
+_FORMATIVE_VISUAL_ELEMENT_KEYWORDS = {
+    "logo", "logos", "typography", "typeface", "font", "fonts", "color", "colors",
+    "palette", "palettes", "imagery", "image", "images", "icon", "icons", "iconography",
+    "layout", "layouts", "grid", "grids", "illustration", "illustrations", "photography",
+    "shape", "shapes", "mark", "wordmark", "visual", "voice", "messaging",
+}
 
 
 def _load_all_rubrics() -> dict[str, Any]:
@@ -478,6 +507,53 @@ def _coerce_boolish(value: Any) -> bool | None:
     return None
 
 
+def _tokenize_formative_text(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _extract_significant_prompt_terms(prompt: str) -> set[str]:
+    tokens = set()
+    for token in _tokenize_formative_text(prompt):
+        if len(token) < 4 or token in _FORMATIVE_STOPWORDS:
+            continue
+        tokens.add(token)
+    return tokens
+
+
+def _build_formative_heuristics(prompt: str, learner_answer: str, competency: str) -> dict[str, Any]:
+    prompt_terms = _extract_significant_prompt_terms(prompt)
+    answer_terms = set(_tokenize_formative_text(learner_answer))
+    shared_terms = sorted(prompt_terms & answer_terms)
+    mission_match = re.search(r'"([^"]+)"', prompt or "")
+    mission_terms = set(_tokenize_formative_text(mission_match.group(1))) if mission_match else set()
+    mission_overlap = sorted(term for term in mission_terms if term in answer_terms and len(term) >= 4)
+    has_reasoning = any(marker in learner_answer.lower() for marker in _FORMATIVE_REASONING_MARKERS)
+    requires_visual_elements = any(
+        clue in f"{competency} {prompt}".lower()
+        for clue in ("brand", "visual", "identity", "logo", "typography", "color", "imagery")
+    )
+    visual_elements = sorted(term for term in answer_terms if term in _FORMATIVE_VISUAL_ELEMENT_KEYWORDS)
+    mentions_specific_elements = len(visual_elements) >= (2 if requires_visual_elements else 1)
+
+    scenario_relevance = bool(mission_overlap) or len(shared_terms) >= 3
+    explanation_quality = has_reasoning
+    concrete_application = mentions_specific_elements if requires_visual_elements else bool(shared_terms) and has_reasoning
+
+    met_count = sum([scenario_relevance, concrete_application, explanation_quality])
+    overall_percent = round((met_count / 3.0) * 100.0, 2)
+    return {
+        "scenario_relevance": scenario_relevance,
+        "concrete_application": concrete_application,
+        "explanation_quality": explanation_quality,
+        "mission_overlap": mission_overlap,
+        "shared_terms": shared_terms[:10],
+        "visual_elements": visual_elements,
+        "requires_visual_elements": requires_visual_elements,
+        "overall_percent": overall_percent,
+        "pass": met_count >= 2 and scenario_relevance and explanation_quality,
+    }
+
+
 def _normalize_binary_evaluation(evaluation: dict[str, Any], rubric: dict[str, Any]) -> dict[str, Any]:
     criteria = rubric.get("criteria", [])
     raw_scores = evaluation.get("criteria_scores") or []
@@ -734,24 +810,35 @@ def _apply_formative_outcome(session: LearnerSession, passed: bool, percent: flo
 
 def _build_formative_rubric(session: LearnerSession) -> dict[str, Any]:
     concept = session.current_subpart or session.current_competency
+    prompt = session.current_formative_prompt or concept
+    requires_visual_elements = any(
+        clue in f"{session.current_competency} {prompt}".lower()
+        for clue in ("brand", "visual", "identity", "logo", "typography", "color", "imagery")
+    )
+    application_description = "Uses the concept in the scenario rather than only defining it"
+    if requires_visual_elements:
+        application_description = (
+            "Names concrete visual identity elements or brand-system decisions that fit the scenario, "
+            "such as logo logic, color palette, typography, imagery, layout, or brand voice."
+        )
     return {
         "criteria": [
             {
                 "criterion_id": "formative_accuracy",
-                "name": "Concept accuracy",
-                "description": f"Understands the current concept: {concept}",
+                "name": "Scenario relevance",
+                "description": f"Addresses the specific scenario and mission in the prompt while using the current concept: {prompt}",
                 "weight": 0.34,
             },
             {
                 "criterion_id": "formative_application",
-                "name": "Applied reasoning",
-                "description": "Uses the concept in the scenario rather than only defining it",
+                "name": "Concrete application",
+                "description": application_description,
                 "weight": 0.33,
             },
             {
                 "criterion_id": "formative_explanation",
                 "name": "Clear explanation",
-                "description": "Explains why the chosen action makes sense",
+                "description": "Explains why the chosen action or element fits the scenario instead of giving only generic statements",
                 "weight": 0.33,
             },
         ],
@@ -762,19 +849,45 @@ def _build_formative_rubric(session: LearnerSession) -> dict[str, Any]:
 
 def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -> tuple[bool, float, str, bool]:
     rubric = _build_formative_rubric(session)
+    prompt = session.current_formative_prompt or session.current_subpart or session.current_competency
     result = AssessmentCrew().crew().kickoff(
         inputs={
             "competency": f"Formative check for {session.current_competency}",
-            "scenario": session.current_formative_prompt or session.current_subpart or session.current_competency,
+            "scenario": prompt,
             "user_response": learner_answer,
             "rubric_json": json.dumps(rubric),
         }
     )
     payload = _safe_json_loads(result.raw, {"criteria_scores": [], "overall_percent": 0.0, "pass": False, "summary": result.raw})
     normalized = _normalize_binary_evaluation(payload, rubric)
+    heuristics = _build_formative_heuristics(prompt, learner_answer, session.current_competency)
     overall = float(normalized.get("overall_percent", 0.0) or 0.0)
     passed = bool(normalized.get("pass", overall >= PASS_THRESHOLD))
     summary = str(normalized.get("summary") or "").strip() or "No detailed formative feedback was returned."
+
+    if not passed and heuristics["pass"] and heuristics["overall_percent"] >= PASS_THRESHOLD:
+        overall = max(overall, float(heuristics["overall_percent"]))
+        passed = True
+        summary = (
+            f"{summary} Heuristic validation confirmed the answer was scenario-specific, concrete, "
+            "and justified, so the formative check was accepted."
+        ).strip()
+    elif passed and not heuristics["scenario_relevance"]:
+        summary = (
+            f"{summary} Warning: the answer passed overall, but scenario-specific alignment looked weak in heuristic validation."
+        ).strip()
+
+    logger.info(
+        "Formative evaluation competency=%s prompt=%r learner_answer=%r raw_payload=%s normalized=%s heuristics=%s final_passed=%s final_percent=%.2f",
+        session.current_competency,
+        prompt[:300],
+        learner_answer[:500],
+        json.dumps(payload, ensure_ascii=True),
+        json.dumps(normalized, ensure_ascii=True),
+        json.dumps(heuristics, ensure_ascii=True),
+        passed,
+        overall,
+    )
     return passed, overall, summary, overall >= EASY_PASS_THRESHOLD
 
 

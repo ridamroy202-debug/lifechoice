@@ -963,6 +963,67 @@ class EvaluationNormalizationTests(unittest.TestCase):
         self.assertGreaterEqual(normalized["overall_percent"], 82.0)
         self.assertTrue(normalized["pass"])
 
+    def test_formative_heuristics_accept_specific_brand_identity_answer(self):
+        import app.orchestrator as orch
+
+        prompt = 'For a startup with the mission to "develop renewable energy solutions," what key visual elements would you focus on, and how would they align with the mission statement?'
+        answer = (
+            "I would focus on a green and blue color palette, clean typography, modular iconography, and optimistic imagery of renewable systems "
+            "because those elements communicate sustainability, trust, and technological progress. These choices align with the mission by making "
+            "the brand look credible, future-focused, and clearly tied to renewable energy outcomes."
+        )
+
+        heuristics = orch._build_formative_heuristics(prompt, answer, "Construct comprehensive brand identity systems")
+        self.assertTrue(heuristics["scenario_relevance"])
+        self.assertTrue(heuristics["concrete_application"])
+        self.assertTrue(heuristics["explanation_quality"])
+        self.assertTrue(heuristics["pass"])
+
+    def test_evaluate_formative_response_uses_heuristic_override_when_model_is_too_harsh(self):
+        import app.orchestrator as orch
+        from app.state import LearnerSession
+
+        class FailingAssessmentCrew:
+            def crew(self):
+                return self
+
+            def kickoff(self, inputs):
+                return Result(
+                    json.dumps(
+                        {
+                            "criteria_scores": [
+                                {"criterion_id": "formative_accuracy", "met": False, "evidence": "Too generic"},
+                                {"criterion_id": "formative_application", "met": False, "evidence": "Did not apply"},
+                                {"criterion_id": "formative_explanation", "met": False, "evidence": "No reasoning"},
+                            ],
+                            "overall_percent": 0.0,
+                            "pass": False,
+                            "summary": "Model judged the answer too harshly.",
+                        }
+                    )
+                )
+
+        session = LearnerSession(
+            topic="Brand Identity Architect",
+            competencies=["Construct comprehensive brand identity systems"],
+        )
+        session.current_formative_prompt = 'For a startup with the mission to "develop renewable energy solutions," what key visual elements would you focus on, and how would they align with the mission statement?'
+
+        with patch.object(orch, "AssessmentCrew", return_value=FailingAssessmentCrew()):
+            passed, overall, summary, easy_pass = orch._evaluate_formative_response(
+                session,
+                (
+                    "I would use a green and blue color palette, modern typography, sustainability-focused imagery, and simple iconography "
+                    "because those visual elements signal renewable energy, trust, and innovation. They align with the mission by making the brand "
+                    "feel environmentally responsible, future-focused, and easy for stakeholders to understand."
+                ),
+            )
+
+        self.assertTrue(passed)
+        self.assertGreaterEqual(overall, 75.0)
+        self.assertIn("Heuristic validation confirmed", summary)
+        self.assertTrue(easy_pass)
+
 
 if __name__ == "__main__":
     unittest.main()

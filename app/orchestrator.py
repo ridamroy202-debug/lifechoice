@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from app.persistence import (
     get_locked_rubric,
     get_rubric_source_hash,
     get_rubric_version,
+    normalize_rubric_key,
     upsert_learner_competency_progress,
     record_competency_attempt,
     record_final_assessment,
@@ -40,6 +42,29 @@ PRE_ASSESSMENT_QUESTION_COUNT = 2
 BASE_LEARNING_INTERACTIONS = 6
 REVISION_INTERACTIONS = 2
 EASY_PASS_THRESHOLD = 90.0
+INTRO_SENTENCE_LIMIT = 3
+TEACHING_WORD_TARGETS = {
+    "foundation": {"floor": 420, "target": 560},
+    "guided_application": {"floor": 460, "target": 620},
+    "mastery_gate": {"floor": 500, "target": 680},
+    "revision": {"floor": 440, "target": 580},
+}
+ACADEMIC_STAGE_WORD_BONUS = {
+    "bachelor": 0,
+    "masters": 60,
+    "phd": 120,
+    "professional": 40,
+}
+REQUIRED_TUTOR_SECTIONS = (
+    "## Title",
+    "## Learner Feedback",
+    "## What This Concept Means",
+    "## How It Works",
+    "## Visual Aid",
+    "## Example",
+    "## Key Takeaway",
+    "## Next Learner Action",
+)
 
 _RUBRICS_CACHE: dict[str, Any] | None = None
 
@@ -145,6 +170,62 @@ def _three_word_competency_brief(competency: str) -> str:
     return " ".join(word.title() for word in brief_words[:3])
 
 
+def _normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip())
+
+
+def _sentence_split(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", _normalize_whitespace(text)) if part.strip()]
+
+
+def _truncate_sentences(text: str, max_sentences: int) -> str:
+    sentences = _sentence_split(text)
+    if not sentences:
+        return text.strip()
+    return " ".join(sentences[:max_sentences])
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\b\w+\b", text))
+
+
+def _teaching_length_policy(session: LearnerSession) -> dict[str, int]:
+    stage = session.chat_stage
+    base = TEACHING_WORD_TARGETS.get(stage, TEACHING_WORD_TARGETS["guided_application"]).copy()
+    bonus = ACADEMIC_STAGE_WORD_BONUS.get(session.academic_stage, 0)
+    base["floor"] += bonus
+    base["target"] += bonus
+    base["ceiling"] = base["target"] + 180
+    return base
+
+
+def _stage_teaching_instruction(session: LearnerSession) -> str:
+    mapping = {
+        "foundation": (
+            "Introduce one foundational concept with intuition, mechanism, and a concrete workplace anchor. "
+            "Keep the tone approachable and scaffold the explanation for a learner who may still be building confidence."
+        ),
+        "guided_application": (
+            "Teach one concept through application. Show how the concept is used, what decision points matter, and why the sequence works."
+        ),
+        "mastery_gate": (
+            "Deepen one concept to university-grade clarity. Include decision criteria, failure patterns, and retrieval practice that forces applied reasoning."
+        ),
+        "revision": (
+            "Reteach the weakest concept using a meaningfully different format, simpler language where needed, and a new example that directly addresses the misconception."
+        ),
+    }
+    return mapping.get(session.chat_stage, mapping["guided_application"])
+
+
+def _missing_tutor_sections(ai_response: str, include_formative: bool) -> list[str]:
+    lowered = ai_response.lower()
+    missing = [section for section in REQUIRED_TUTOR_SECTIONS if section.lower() not in lowered]
+    if include_formative and "formative check" not in lowered:
+        missing.append("## Formative Check")
+    return missing
+
+
 def _log_session_event(session: LearnerSession, route: str, event_type: str, payload: dict[str, Any]) -> None:
     append_event_log(session.session_id, session.learner_id, route, event_type, payload)
 
@@ -234,19 +315,32 @@ def _runtime_fields(session: LearnerSession) -> dict[str, Any]:
 def build_competency_intro(session: LearnerSession) -> str:
     competency = session.current_competency
     details = _get_competency_details(session, competency)
-    description = str(details.get("description") or "").strip().replace(".", ";")
+    description = _truncate_sentences(str(details.get("description") or "").strip(), 1)
     brief = _three_word_competency_brief(competency)
-    description_text = f" {description}" if description else ""
-    intro_message = (
-        f"**{brief}**\n\n"
-        f"We are starting **{competency}**.{description_text} "
-        "I will teach one concept at a time and check your understanding as we go. "
-        "Start the diagnostic when you are ready."
+    sentence_one = f"We are starting **{competency}**, and this competency matters because it helps you make sound decisions in real work situations."
+    sentence_two = (
+        f"By the end of this session, you should be able to use {competency.lower()} with clear reasoning, practical structure, and confident judgment."
     )
+    sentence_three = (
+        f"We will move one concept at a time through **{brief}**, starting with a short diagnostic so the teaching depth matches your current level."
+    )
+    if description:
+        sentence_one = f"We are starting **{competency}**: {description}"
+    intro_message = f"{sentence_one} {sentence_two} {sentence_three}"
     session.intro_delivered = True
     session.competency_interaction = 1
     session.add_message("assistant", intro_message)
     _record_session_interaction(session, interaction_type="intro", interaction_number=1, concept=competency)
+    _record_remote_teaching_interaction(
+        session,
+        competency,
+        ai_prompt=f"Introduce the competency {competency} in warm, simple language.",
+        ai_response=intro_message,
+        learner_input=None,
+        formative_passed=None,
+        interaction_type="intro",
+        allow_session_creation=True,
+    )
     save_session(session)
     return intro_message
 
@@ -255,7 +349,8 @@ def _normalize_remote_rubric(payload: dict[str, Any] | None) -> dict[str, Any] |
     if not payload:
         return None
 
-    raw_criteria = payload.get("rubric_criteria") or {}
+    rubric_root = payload.get("rubric_rules") if isinstance(payload.get("rubric_rules"), dict) else payload
+    raw_criteria = rubric_root.get("rubric_rules") or rubric_root.get("rubric_criteria") or {}
     iterable: list[dict[str, Any]]
     if isinstance(raw_criteria, dict):
         iterable = raw_criteria.get("criteria", [])
@@ -270,21 +365,26 @@ def _normalize_remote_rubric(payload: dict[str, Any] | None) -> dict[str, Any] |
     for index, item in enumerate(iterable, start=1):
         criteria.append(
             {
-                "name": str(item.get("criterion") or item.get("name") or f"Criterion {index}"),
-                "description": str(item.get("descriptor") or item.get("met_indicator") or ""),
-                "weight": weight,
-                "criterion_id": str(item.get("id") or f"c{index}"),
+                "name": str(item.get("criterion_name") or item.get("criterion") or item.get("name") or f"Criterion {index}"),
+                "description": str(item.get("criterion_descriptor") or item.get("descriptor") or item.get("met_indicator") or ""),
+                "weight": float(item.get("weight") or weight),
+                "criterion_id": str(item.get("criterion_id") or item.get("id") or f"c{index}"),
             }
         )
     if not criteria:
         return None
 
+    payload_json = json.dumps({"criteria": criteria, "pass_threshold": rubric_root.get("pass_threshold") or PASS_THRESHOLD}, sort_keys=True)
     return {
+        "rubric_key": normalize_rubric_key(str(rubric_root.get("competency_title") or "")) or None,
+        "display_name": rubric_root.get("competency_title"),
         "criteria": criteria,
-        "pass_threshold": float(payload.get("pass_threshold") or PASS_THRESHOLD),
-        "scenario_template": payload.get("scenario_template"),
-        "difficulty_level": payload.get("difficulty_level"),
-        "source": "remote",
+        "pass_threshold": float(rubric_root.get("pass_threshold") or PASS_THRESHOLD),
+        "scenario_template": rubric_root.get("scenario_template"),
+        "difficulty_level": rubric_root.get("difficulty_level"),
+        "version": int(rubric_root.get("version") or 1),
+        "source_hash": hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+        "source": "remote_db",
     }
 
 
@@ -293,7 +393,23 @@ def _load_assessment_context(session: LearnerSession, competency: str) -> tuple[
     if competency in session.rubric_cache:
         cached = session.rubric_cache[competency]
         scenario = cached.get("scenario_template") or details.get("description") or session.study_materials.get(competency, "")
-        return cached, str(scenario), "db_locked"
+        return cached, str(scenario), str(cached.get("source") or "db_locked")
+
+    remote_competency_id = session.current_remote_competency_id or details.get("id")
+    if remote_competency_id:
+        try:
+            remote_payload = remote_backend_client.fetch_competency_rubric(int(remote_competency_id), token=session.remote_auth_token)
+        except RemoteBackendError:
+            remote_payload = None
+        remote_rubric = _normalize_remote_rubric(remote_payload)
+        if remote_rubric:
+            if not remote_rubric.get("rubric_key"):
+                remote_rubric["rubric_key"] = normalize_rubric_key(competency)
+            if not remote_rubric.get("display_name"):
+                remote_rubric["display_name"] = competency
+            session.rubric_cache[competency] = remote_rubric
+            scenario = remote_rubric.get("scenario_template") or details.get("description") or session.study_materials.get(competency, "")
+            return remote_rubric, str(scenario), "remote_db"
 
     locked = get_locked_rubric(competency)
     if not locked:
@@ -407,12 +523,12 @@ def _lower_difficulty(current: str) -> str:
 
 def _delivery_mode(session: LearnerSession) -> str:
     modes = [
-        "analogy",
-        "step_by_step",
-        "comparison_table",
+        "guided_explanation",
         "worked_example",
+        "comparison_table",
+        "scenario_walkthrough",
         "mini_challenge",
-        "error_clinic",
+        "decision_framework",
     ]
     index = len(session.delivery_format_history) % len(modes)
     candidate = modes[index]
@@ -426,8 +542,8 @@ def _build_personalization_state(session: LearnerSession) -> dict[str, str]:
     state = {
         "difficulty_tier": session.current_difficulty,
         "delivery_mode": delivery_mode,
-        "support_style": "high-guidance" if session.current_difficulty == "support" else "coaching",
-        "feedback_style": "encouraging" if session.consecutive_formative_fails == 0 else "supportive-recovery",
+        "support_style": "high-guidance" if session.current_difficulty == "support" else ("challenging-coach" if session.current_difficulty == "stretch" else "coaching"),
+        "feedback_style": "encouraging" if session.consecutive_formative_fails == 0 else "empathetic-recovery",
         "mastery_status": "ready" if session.final_assessment_unlocked else "in_progress",
         "revision_mode": "active" if session.revision_required else "inactive",
         "spaced_learning_rule": "one concept per interaction",
@@ -621,29 +737,29 @@ def _should_ask_formative_check(session: LearnerSession) -> bool:
 
 def _interaction_goal(session: LearnerSession) -> str:
     if session.learning_turn <= 2:
-        return "Teach the next core concept clearly and simply."
+        return "Teach one foundational concept with intuitive explanation, mechanism detail, and a clear workplace example."
     if session.learning_turn <= 4:
-        return "Show how to apply the concept with reasoning and examples."
+        return "Teach one applied concept with decision reasoning, tradeoffs, and a concrete scenario."
     if session.learning_turn <= 6:
-        return "Prepare the learner for the mastery gate with practice and precise feedback."
+        return "Prepare the learner for the mastery gate with university-grade explanation, retrieval practice, and precise feedback."
     return "Run focused revision on the weakest concept and repair misconceptions."
 
 
 def _parse_formative_prompt(ai_response: str) -> str:
-    parts = ai_response.rsplit("**Formative Check**", 1)
-    if len(parts) == 2:
-        return parts[1].strip()
+    match = re.split(r"(?i)(?:\*\*|##\s*)formative check(?:\*\*)?", ai_response, maxsplit=1)
+    if len(match) == 2:
+        return match[1].strip()
     return ai_response.strip()
 
 
 def _alternate_delivery_mode(current_mode: str | None) -> str:
     modes = [
-        "analogy",
-        "step_by_step",
-        "comparison_table",
+        "guided_explanation",
         "worked_example",
+        "comparison_table",
+        "scenario_walkthrough",
         "mini_challenge",
-        "error_clinic",
+        "decision_framework",
     ]
     if current_mode not in modes:
         return modes[0]
@@ -740,8 +856,11 @@ def _record_remote_teaching_interaction(
     formative_passed: bool | None,
     *,
     interaction_type: str,
+    allow_session_creation: bool = True,
 ):
-    remote_learning_session_id = _ensure_remote_learning_session(session, competency)
+    remote_learning_session_id = session.current_remote_learning_session_id
+    if not remote_learning_session_id and allow_session_creation:
+        remote_learning_session_id = _ensure_remote_learning_session(session, competency)
     if not remote_learning_session_id:
         return
 
@@ -765,15 +884,19 @@ def _record_remote_teaching_interaction(
 def _generate_learning_response(session: LearnerSession, user_message: str, formative_feedback: str = "") -> tuple[str, str]:
     competency = session.current_competency
     competency_label = _competency_prompt_label(session, competency)
+    competency_description = str(_get_competency_details(session, competency).get("description") or "").strip()
     current_subpart = session.current_subpart or competency
     personalization = _build_personalization_state(session)
     include_formative = _should_ask_formative_check(session)
+    length_policy = _teaching_length_policy(session)
+    previous_formats = ", ".join(session.delivery_format_history[-3:]) or "none yet"
 
     def _kickoff(delivery_mode: str, anti_repeat_instruction: str = "") -> str:
         result = TutorCrew().crew().kickoff(
             inputs={
                 "topic": session.topic,
                 "competency": competency_label,
+                "competency_description": competency_description or "No backend competency description available.",
                 "user_level": session.user_level,
                 "weak_areas": ", ".join(session.weak_areas) or "none",
                 "chat_history": session.format_recent_history(),
@@ -798,19 +921,29 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
                 "interaction_goal": _interaction_goal(session),
                 "include_formative_check": "yes" if include_formative else "no",
                 "revision_required": "yes" if session.revision_required else "no",
+                "stage_instruction": _stage_teaching_instruction(session),
+                "response_word_floor": length_policy["floor"],
+                "response_word_target": length_policy["target"],
+                "response_word_ceiling": length_policy["ceiling"],
+                "previous_delivery_modes": previous_formats,
                 "anti_repeat_instruction": anti_repeat_instruction or "Do not repeat the previous explanation verbatim.",
             }
         )
         return result.raw.strip()
 
     ai_response = _kickoff(personalization["delivery_mode"])
-    if _is_repeated_explanation(session, ai_response):
+    missing_sections = _missing_tutor_sections(ai_response, include_formative)
+    if _is_repeated_explanation(session, ai_response) or _word_count(ai_response) < length_policy["floor"] or missing_sections:
         alternate_mode = _alternate_delivery_mode(personalization["delivery_mode"])
         personalization["delivery_mode"] = alternate_mode
         session.personalization_state["delivery_mode"] = alternate_mode
         ai_response = _kickoff(
             alternate_mode,
-            anti_repeat_instruction="Use a different explanatory approach, different structure, and different example from the previous assistant message.",
+            anti_repeat_instruction=(
+                "Use a different explanatory approach, different structure, and different example from the previous assistant message. "
+                f"Expand the response to at least {length_policy['floor']} words and include these missing sections if absent: "
+                f"{', '.join(missing_sections) if missing_sections else 'all required sections'}."
+            ),
         )
     session.add_message("assistant", ai_response)
     interaction_type = "revision" if session.revision_required and session.learning_turn > BASE_LEARNING_INTERACTIONS else "teach"
@@ -879,6 +1012,16 @@ async def handle_pre_assessment_start(session: LearnerSession) -> dict[str, Any]
     session.competency_interaction = max(session.competency_interaction, 2)
     session.add_message("assistant", prompt)
     _record_session_interaction(session, interaction_type="diagnostic", interaction_number=2, concept=session.current_competency)
+    _record_remote_teaching_interaction(
+        session,
+        session.current_competency,
+        ai_prompt=f"Run a short diagnostic for {session.current_competency}.",
+        ai_response=prompt,
+        learner_input=None,
+        formative_passed=None,
+        interaction_type="diagnostic",
+        allow_session_creation=True,
+    )
     save_session(session)
     return {
         "session_id": session.session_id,
@@ -1123,11 +1266,27 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     overall = float(normalized.get("overall_percent", 0.0) or 0.0)
     passed = bool(normalized.get("pass", overall >= PASS_THRESHOLD))
     summary = str(normalized.get("summary") or "").strip() or "No assessment summary returned."
-    rubric_key = rubric.get("rubric_key") or competency
-    rubric_version = get_rubric_version(competency)
-    rubric_hash = rubric.get("source_hash")
+    rubric_key = rubric.get("rubric_key") or normalize_rubric_key(competency)
+    rubric_version = int(rubric.get("version") or get_rubric_version(competency) or 1)
+    rubric_hash = rubric.get("source_hash") or get_rubric_source_hash(competency)
     remote_competency_id = session.current_remote_competency_id
     remote_micro_credential_id = session.remote_micro_credential_id
+    _record_session_interaction(
+        session,
+        interaction_type="competency_assessment",
+        interaction_number=max(session.competency_interaction, 9),
+        concept=competency,
+    )
+    _record_remote_teaching_interaction(
+        session,
+        competency,
+        ai_prompt=prompt,
+        ai_response=summary,
+        learner_input=user_answer,
+        formative_passed=passed,
+        interaction_type="competency_assessment",
+        allow_session_creation=False,
+    )
 
     remote_learning_session_id = _ensure_remote_learning_session(session, competency)
     if remote_learning_session_id:
@@ -1193,6 +1352,16 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
                 interaction_type="final_assessment",
                 interaction_number=session.competency_interaction + 1,
                 concept=session.topic,
+            )
+            _record_remote_teaching_interaction(
+                session,
+                competency,
+                ai_prompt=f"Present the final integrated assessment for {session.topic}.",
+                ai_response=session.final_assessment_prompt,
+                learner_input=None,
+                formative_passed=None,
+                interaction_type="final_assessment",
+                allow_session_creation=False,
             )
             save_session(session)
             return {
@@ -1322,6 +1491,16 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
     passed = bool(normalized.get("pass", overall >= PASS_THRESHOLD))
     summary = str(normalized.get("summary") or "").strip() or "No final assessment summary returned."
     record_final_assessment(session.session_id, session.final_assessment_attempts, prompt, user_answer, normalized, overall, passed)
+    _record_remote_teaching_interaction(
+        session,
+        session.current_competency,
+        ai_prompt=prompt,
+        ai_response=summary,
+        learner_input=user_answer,
+        formative_passed=passed,
+        interaction_type="final_assessment",
+        allow_session_creation=False,
+    )
 
     if passed:
         session.phase = "completed"

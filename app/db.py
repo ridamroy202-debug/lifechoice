@@ -172,5 +172,13 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS remote_session_mappings (
+                remote_session_id INTEGER PRIMARY KEY,
+                local_session_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (local_session_id) REFERENCES learning_sessions (session_id)
+            );
             '''
         )

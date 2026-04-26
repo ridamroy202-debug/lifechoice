@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 from urllib.parse import urljoin
 
@@ -14,6 +15,13 @@ class RemoteBackendError(RuntimeError):
 
 
 class RemoteBackendClient:
+    _interaction_fallback_map = {
+        "intro": "teaching",
+        "diagnostic": "teaching",
+        "competency_assessment": "teaching",
+        "final_assessment": "teaching",
+    }
+
     def __init__(self) -> None:
         self.base_url = settings.remote_backend_url
         self.default_token = settings.remote_api_token
@@ -101,6 +109,13 @@ class RemoteBackendClient:
             params["competency_id"] = competency_id
         return self._request("GET", "/lesson/competencies/", params=params)
 
+    def fetch_competency_rubric(self, competency_id: int, *, token: str | None = None) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/lesson/competencies/{competency_id}/rubric-rules/",
+            token=token,
+        )
+
     def check_access(self, mc_id: int, *, token: str | None) -> dict[str, Any]:
         if not (token or self.default_token):
             raise RemoteBackendError("Remote backend auth token is required to check enrollment access")
@@ -145,12 +160,36 @@ class RemoteBackendClient:
             body["learner_input"] = learner_input
         if formative_passed is not None:
             body["formative_passed"] = formative_passed
-        return self._request(
-            "POST",
-            f"/learning/sessions/{session_id}/interact/",
-            token=token,
-            json_body=body,
-        )
+        path = f"/learning/sessions/{session_id}/interact/"
+        try:
+            return self._request(
+                "POST",
+                path,
+                token=token,
+                json_body=body,
+            )
+        except RemoteBackendError as exc:
+            fallback_type = self._interaction_fallback_map.get(interaction_type)
+            if not fallback_type:
+                raise
+            fallback_prompt = (
+                f"{ai_prompt}\n\n[AI_ENGINE_FALLBACK]"
+                f"{json.dumps({'original_interaction_type': interaction_type}, separators=(',', ':'))}"
+            )
+            fallback_body = dict(body)
+            fallback_body["interaction_type"] = fallback_type
+            fallback_body["ai_prompt"] = fallback_prompt
+            try:
+                return self._request(
+                    "POST",
+                    path,
+                    token=token,
+                    json_body=fallback_body,
+                )
+            except RemoteBackendError as fallback_exc:
+                raise RemoteBackendError(
+                    f"{exc} | fallback interaction sync failed: {fallback_exc}"
+                ) from fallback_exc
 
     def submit_assessment(
         self,

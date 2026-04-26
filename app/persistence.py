@@ -604,3 +604,38 @@ def update_remote_learning_session_ref(
             ''',
             (status, latest_score, utc_now_iso(), int(remote_session_id)),
         )
+
+
+def upsert_remote_session_mapping(remote_session_id: int, local_session_id: str) -> None:
+    now = utc_now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            '''
+            INSERT INTO remote_session_mappings (remote_session_id, local_session_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(remote_session_id) DO UPDATE SET
+                local_session_id=excluded.local_session_id,
+                updated_at=excluded.updated_at
+            ''',
+            (int(remote_session_id), local_session_id, now, now),
+        )
+
+
+def get_remote_session_mapping(remote_session_id: int) -> dict[str, Any] | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            '''
+            SELECT remote_session_id, local_session_id, created_at, updated_at
+            FROM remote_session_mappings
+            WHERE remote_session_id = ?
+            ''',
+            (int(remote_session_id),),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "remote_session_id": int(row["remote_session_id"]),
+        "local_session_id": row["local_session_id"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }

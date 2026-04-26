@@ -40,10 +40,27 @@ class FakeCrew:
                 )
             )
         if self.kind == "tutor":
-            base = f"Teaching {inputs['competency']} using {inputs['delivery_mode']} at {inputs['difficulty_tier']} difficulty."
+            base = (
+                "## Title\n"
+                f"Teaching {inputs['competency']} using {inputs['delivery_mode']} at {inputs['difficulty_tier']} difficulty.\n\n"
+                "## Learner Feedback\n"
+                "You identified the main direction correctly and now need a clearer mechanism-level explanation.\n\n"
+                "## What This Concept Means\n"
+                "This concept explains one practical idea in a clear, applied way for the learner.\n\n"
+                "## How It Works\n"
+                "Step 1 explains the setup, step 2 shows the decision process, and step 3 shows how to validate the outcome.\n\n"
+                "## Visual Aid\n"
+                "| Step | Why it matters |\n| --- | --- |\n| 1 | Establish context |\n| 2 | Apply the rule |\n| 3 | Validate the result |\n\n"
+                "## Example\n"
+                "In a workplace scenario, the learner applies the concept to a realistic prompt-design problem and explains the reasoning.\n\n"
+                "## Key Takeaway\n"
+                "Use one clear concept, one explicit decision path, and one validation step.\n\n"
+                "## Next Learner Action\n"
+                "Apply the concept to the next scenario and justify your choice.\n"
+            )
             if inputs.get("include_formative_check") == "yes":
-                return Result(base + "\n\n**Formative Check**\nApply this concept to a realistic scenario and justify your design.")
-            return Result(base + "\n\nWorked example and immediate feedback.")
+                return Result(base + "\n\n## Formative Check\nApply this concept to a realistic scenario and justify your design.")
+            return Result(base)
         if self.kind == "assessment":
             competency = inputs.get("competency", "")
             if "Formative check" in competency:
@@ -160,6 +177,7 @@ class EngineFlowTests(unittest.TestCase):
                 DELETE FROM final_assessments;
                 DELETE FROM formative_checks;
                 DELETE FROM competency_attempts;
+                DELETE FROM remote_session_mappings;
                 DELETE FROM learner_competency_progress;
                 DELETE FROM remote_learning_session_refs;
                 DELETE FROM learning_sessions;
@@ -218,6 +236,39 @@ class EngineFlowTests(unittest.TestCase):
         backend.submit_assessment = lambda **kwargs: {"ok": True}
         backend.fetch_learning_session = lambda session_id, **kwargs: {"success": True, "session": {"id": session_id, "status": "active"}}
         backend.fetch_gamification_progress = lambda *args, **kwargs: {"success": True, "progress": {"points_earned": 0}}
+        backend.fetch_competency_rubric = lambda competency_id, **kwargs: {
+            "success": True,
+            "rubric_rules": {
+                "competency_id": competency_id,
+                "competency_title": "Write structured prompts" if int(competency_id) == 61 else "Optimize outputs iteratively",
+                "rubric_rules": [
+                    {
+                        "criterion_id": "c1",
+                        "criterion_name": "Objective framing",
+                        "criterion_descriptor": "Identify the correct objective.",
+                        "weight": 0.25,
+                    },
+                    {
+                        "criterion_id": "c2",
+                        "criterion_name": "Applied execution",
+                        "criterion_descriptor": "Apply the competency in context.",
+                        "weight": 0.30,
+                    },
+                    {
+                        "criterion_id": "c3",
+                        "criterion_name": "Reasoned justification",
+                        "criterion_descriptor": "Explain why the approach fits.",
+                        "weight": 0.25,
+                    },
+                    {
+                        "criterion_id": "c4",
+                        "criterion_name": "Risk and quality control",
+                        "criterion_descriptor": "Identify risks and checks.",
+                        "weight": 0.20,
+                    },
+                ],
+            },
+        }
 
         self.orch.remote_backend_client.fetch_lesson_competencies = backend.fetch_lesson_competencies
         self.orch.remote_backend_client.check_access = backend.check_access
@@ -227,6 +278,7 @@ class EngineFlowTests(unittest.TestCase):
         self.orch.remote_backend_client.submit_assessment = backend.submit_assessment
         self.orch.remote_backend_client.fetch_learning_session = backend.fetch_learning_session
         self.orch.remote_backend_client.fetch_gamification_progress = backend.fetch_gamification_progress
+        self.orch.remote_backend_client.fetch_competency_rubric = backend.fetch_competency_rubric
 
     def _start_remote_session(self, client: TestClient) -> str:
         response = client.post(
@@ -311,6 +363,178 @@ class EngineFlowTests(unittest.TestCase):
             self.assertEqual(status_payload["required_next_action"], "generate_certificate")
             self.assertIn("completed_competencies", status_payload["session_summary"])
 
+    def test_unified_interact_route_handles_context_and_full_progression(self):
+        with TestClient(self.app) as client:
+            session_id = self._start_remote_session(client)
+
+            context = client.post(f"/session/{session_id}/interact")
+            self.assertEqual(context.status_code, 200, context.text)
+            context_payload = context.json()
+            self.assertFalse(context_payload["counted_as_interaction"])
+            self.assertEqual(context_payload["phase"], "pre_assessment")
+            self.assertTrue(context_payload["current_prompt"])
+
+            diagnostic = client.post(
+                f"/session/{session_id}/interact",
+                json={"message": "I understand prompt basics and can describe constraints and output structure."},
+            )
+            self.assertEqual(diagnostic.status_code, 200, diagnostic.text)
+            self.assertEqual(diagnostic.json()["phase"], "learning")
+            self.assertTrue(diagnostic.json()["counted_as_interaction"])
+
+            while True:
+                status = client.get(f"/session/{session_id}")
+                self.assertEqual(status.status_code, 200, status.text)
+                state = status.json()
+
+                if state["phase"] == "completed":
+                    break
+
+                if state["phase"] == "pre_assessment":
+                    prompt_payload = client.post(f"/session/{session_id}/interact")
+                    self.assertEqual(prompt_payload.status_code, 200, prompt_payload.text)
+                    answer = "I understand prompt basics and can describe constraints and output structure."
+                elif state["phase"] == "learning":
+                    if state["awaiting_formative_response"]:
+                        answer = "I would apply the concept in a realistic scenario and justify the design choices clearly."
+                    else:
+                        answer = "I would structure the prompt with goal, constraints, output format, and a worked example."
+                elif state["phase"] == "competency_assessment":
+                    answer = "Applied scenario answer with steps, rationale, validation, and risk controls."
+                elif state["phase"] == "final_assessment":
+                    answer = "Integrated answer combining all competencies into one end-to-end delivery plan with governance and validation."
+                else:
+                    self.fail(f"Unexpected phase during unified interaction test: {state['phase']}")
+
+                step = client.post(
+                    f"/session/{session_id}/interact",
+                    json={"message": answer},
+                )
+                self.assertEqual(step.status_code, 200, step.text)
+
+            final_status = client.get(f"/session/{session_id}")
+            self.assertEqual(final_status.status_code, 200, final_status.text)
+            final_payload = final_status.json()
+            self.assertEqual(final_payload["phase"], "completed")
+            self.assertEqual(len(final_payload["completed_competencies"]), 2)
+            self.assertEqual(final_payload["required_next_action"], "generate_certificate")
+
+    def test_unified_interact_route_can_hydrate_remote_backend_session_id(self):
+        remote_payload = {
+            "success": True,
+            "data": {
+                "domains": [
+                    {
+                        "id": 5,
+                        "name": "Technology",
+                        "source": "IKON",
+                        "micro_credentials": [
+                            {
+                                "id": 61,
+                                "micro_credential": "Digital Transformation Specialist",
+                                "level": "EQF 7",
+                                "competencies": [
+                                    {
+                                        "id": 601,
+                                        "code": 1,
+                                        "title": "Digital maturity assessment",
+                                        "description": "Assess digital maturity across people, process, data, and technology.",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        backend = self.main_mod.remote_backend_client
+        backend.fetch_learning_session = lambda session_id, **kwargs: {
+            "success": True,
+            "session": {
+                "id": int(session_id),
+                "micro_credential": 61,
+                "competency": 601,
+                "attempt_number": 1,
+                "status": "in_progress",
+                "interaction_count": 0,
+                "interactions": [],
+            },
+        }
+        backend.fetch_lesson_competencies = lambda **kwargs: remote_payload
+        self.orch.remote_backend_client.fetch_learning_session = backend.fetch_learning_session
+        self.orch.remote_backend_client.fetch_lesson_competencies = backend.fetch_lesson_competencies
+
+        with TestClient(self.app) as client:
+            context = client.post("/session/1122/interact", json={"auth_token": "token"})
+            self.assertEqual(context.status_code, 200, context.text)
+            context_payload = context.json()
+            self.assertFalse(context_payload["counted_as_interaction"])
+            self.assertEqual(context_payload["source"], "remote")
+            self.assertEqual(context_payload["remote_micro_credential_id"], 61)
+            self.assertEqual(context_payload["current_remote_learning_session_id"], 1122)
+            self.assertEqual(context_payload["current_competency"], "Digital maturity assessment")
+            self.assertTrue(context_payload["current_prompt"])
+            local_session_id = context_payload["session_id"]
+            self.assertNotEqual(local_session_id, "1122")
+
+            step = client.post(
+                "/session/1122/interact",
+                json={
+                    "auth_token": "token",
+                    "message": "Digital maturity assessment evaluates organisational readiness across leadership, process, data, technology, and capability so transformation priorities can be set on evidence.",
+                },
+            )
+            self.assertEqual(step.status_code, 200, step.text)
+            step_payload = step.json()
+            self.assertTrue(step_payload["counted_as_interaction"])
+            self.assertEqual(step_payload["phase"], "learning")
+            self.assertEqual(step_payload["session_id"], local_session_id)
+
+    def test_remote_sync_uses_extended_interaction_types(self):
+        recorded_types: list[str] = []
+        backend = self.main_mod.remote_backend_client
+        backend.record_interaction = lambda **kwargs: recorded_types.append(kwargs["interaction_type"]) or {"ok": True}
+        self.orch.remote_backend_client.record_interaction = backend.record_interaction
+
+        with TestClient(self.app) as client:
+            session_id = self._start_remote_session(client)
+
+            intro_context = client.get(f"/session/{session_id}")
+            self.assertEqual(intro_context.status_code, 200, intro_context.text)
+
+            pre_start = client.post("/pre-assessment/start", json={"session_id": session_id})
+            self.assertEqual(pre_start.status_code, 200, pre_start.text)
+
+            pre_answer = client.post(
+                "/pre-assessment/chat",
+                json={"session_id": session_id, "answer": "I understand structured prompting and can apply constraints clearly."},
+            )
+            self.assertEqual(pre_answer.status_code, 200, pre_answer.text)
+
+            while True:
+                state = client.get(f"/session/{session_id}").json()
+                if state["phase"] == "competency_assessment":
+                    break
+                answer = (
+                    "I would apply the concept in a realistic scenario and justify the design clearly."
+                    if state["awaiting_formative_response"]
+                    else "I would define the goal, audience, constraints, and output structure with one applied example."
+                )
+                step = client.post("/learn/chat", json={"session_id": session_id, "message": answer})
+                self.assertEqual(step.status_code, 200, step.text)
+
+            assess = client.post(
+                "/assessment/competency",
+                json={"session_id": session_id, "answer": "Applied scenario answer with rationale, validation, and explicit risk controls."},
+            )
+            self.assertEqual(assess.status_code, 200, assess.text)
+
+            self.assertIn("intro", recorded_types)
+            self.assertIn("diagnostic", recorded_types)
+            self.assertIn("teaching", recorded_types)
+            self.assertIn("formative_check", recorded_types)
+            self.assertIn("competency_assessment", recorded_types)
+
     def test_guards_block_out_of_phase_actions(self):
         with TestClient(self.app) as client:
             session_id = self._start_remote_session(client)
@@ -323,6 +547,22 @@ class EngineFlowTests(unittest.TestCase):
 
             certificate = client.post("/certificate/generate", json={"session_id": session_id, "auth_token": "token"})
             self.assertEqual(certificate.status_code, 400)
+
+    def test_intro_message_stays_within_three_sentences(self):
+        with TestClient(self.app) as client:
+            response = client.post(
+                "/session/start",
+                json={
+                    "learner_id": "7",
+                    "domain_id": 22,
+                    "micro_credential_id": 197,
+                    "auth_token": "token",
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            intro = response.json()["message"]
+            sentences = [part.strip() for part in intro.replace("\n", " ").split(".") if part.strip()]
+            self.assertLessEqual(len(sentences), 3)
 
     def test_session_start_blocks_microcredential_without_locked_rubrics(self):
         payload = {
@@ -349,7 +589,9 @@ class EngineFlowTests(unittest.TestCase):
         }
         backend = self.main_mod.remote_backend_client
         backend.fetch_lesson_competencies = lambda **kwargs: payload
+        backend.fetch_competency_rubric = lambda competency_id, **kwargs: {"success": True, "rubric_rules": {"competency_id": competency_id, "rubric_rules": []}}
         self.orch.remote_backend_client.fetch_lesson_competencies = backend.fetch_lesson_competencies
+        self.orch.remote_backend_client.fetch_competency_rubric = backend.fetch_competency_rubric
 
         with TestClient(self.app) as client:
             response = client.post(
@@ -365,6 +607,59 @@ class EngineFlowTests(unittest.TestCase):
             detail = response.json()["detail"]
             self.assertIn("missing_competencies", detail)
             self.assertIn("Define AI scope", detail["missing_competencies"])
+
+    def test_session_start_allows_remote_microcredential_when_remote_rubrics_exist(self):
+        payload = {
+            "success": True,
+            "data": {
+                "domains": [
+                    {
+                        "id": 22,
+                        "source": "IKON",
+                        "micro_credentials": [
+                            {
+                                "id": 198,
+                                "micro_credential": "AI Project Manager",
+                                "level": "Intermediate",
+                                "competencies": [
+                                    {"id": 71, "code": 1, "title": "Define AI scope", "description": "Define project scope for AI work."},
+                                    {"id": 72, "code": 2, "title": "Prioritise AI use cases", "description": "Prioritise cases by value and feasibility."},
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        backend = self.main_mod.remote_backend_client
+        backend.fetch_lesson_competencies = lambda **kwargs: payload
+        backend.fetch_competency_rubric = lambda competency_id, **kwargs: {
+            "success": True,
+            "rubric_rules": {
+                "competency_id": competency_id,
+                "competency_title": "Define AI scope" if int(competency_id) == 71 else "Prioritise AI use cases",
+                "rubric_rules": [
+                    {"criterion_id": "c1", "criterion_name": "Objective framing", "criterion_descriptor": "Identify scope.", "weight": 0.25},
+                    {"criterion_id": "c2", "criterion_name": "Applied execution", "criterion_descriptor": "Apply in context.", "weight": 0.30},
+                    {"criterion_id": "c3", "criterion_name": "Reasoned justification", "criterion_descriptor": "Justify choice.", "weight": 0.25},
+                    {"criterion_id": "c4", "criterion_name": "Risk and quality control", "criterion_descriptor": "Identify risks.", "weight": 0.20},
+                ],
+            },
+        }
+        self.orch.remote_backend_client.fetch_lesson_competencies = backend.fetch_lesson_competencies
+        self.orch.remote_backend_client.fetch_competency_rubric = backend.fetch_competency_rubric
+
+        with TestClient(self.app) as client:
+            response = client.post(
+                "/session/start",
+                json={
+                    "learner_id": "7",
+                    "domain_id": 22,
+                    "micro_credential_id": 198,
+                    "auth_token": "token",
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
 
     def test_docs_openapi_and_new_backend_proxy_routes_are_exposed(self):
         with TestClient(self.app) as client:
@@ -383,6 +678,7 @@ class EngineFlowTests(unittest.TestCase):
             self.assertIn("/backend/learning/sessions/{session_id}/assess", paths)
             self.assertIn("/backend/gamification/progress/{session_id}", paths)
             self.assertIn("/backend/learner/micro-credential/progress", paths)
+            self.assertIn("/session/{session_id}/interact", paths)
 
     def test_cors_preflight_allows_local_frontend_origin(self):
         with TestClient(self.app) as client:
@@ -397,10 +693,13 @@ class EngineFlowTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:3000")
 
-    def test_remote_rubric_proxy_is_marked_unsupported(self):
+    def test_remote_rubric_proxy_returns_remote_rules(self):
         with TestClient(self.app) as client:
-            response = client.get("/backend/lesson/rubric/61")
-            self.assertEqual(response.status_code, 501)
+            response = client.get("/backend/lesson/rubric/61?auth_token=token")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["rubric_rules"]["competency_id"], 61)
+            self.assertTrue(payload["rubric_rules"]["rubric_rules"])
 
     def test_backend_profile_competencies_access_and_learning_session_routes(self):
         with TestClient(self.app) as client:
@@ -571,6 +870,45 @@ class RemoteBackendContractTests(unittest.TestCase):
         self.assertIn("https://lifechoice.duckdns.org/learning/sessions/start/", urls)
         self.assertIn("https://lifechoice.duckdns.org/learning/sessions/501/", urls)
         self.assertIn("https://lifechoice.duckdns.org/gamification/progress/501/", urls)
+
+    def test_record_interaction_falls_back_for_extended_types(self):
+        from app.remote_backend import RemoteBackendClient
+
+        client = RemoteBackendClient()
+        calls: list[dict] = []
+
+        class FakeResponse:
+            def __init__(self, status_code: int, payload: dict[str, object]):
+                self.status_code = status_code
+                self._payload = payload
+                self.text = json.dumps(payload)
+                self.content = self.text.encode("utf-8")
+
+            def json(self):
+                return self._payload
+
+        def fake_request(method, url, **kwargs):
+            calls.append({"method": method, "url": url, "json": kwargs.get("json")})
+            if len(calls) == 1:
+                return FakeResponse(400, {"detail": "invalid choice"})
+            return FakeResponse(201, {"success": True})
+
+        with patch("app.remote_backend.requests.request", side_effect=fake_request):
+            payload = client.record_interaction(
+                session_id=1125,
+                interaction_type="competency_assessment",
+                ai_prompt="Assessment prompt",
+                ai_response="Assessment feedback",
+                learner_input="Learner answer",
+                formative_passed=True,
+                token="token",
+            )
+
+        self.assertEqual(payload["success"], True)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["json"]["interaction_type"], "competency_assessment")
+        self.assertEqual(calls[1]["json"]["interaction_type"], "teaching")
+        self.assertIn("[AI_ENGINE_FALLBACK]", calls[1]["json"]["ai_prompt"])
 
 
 if __name__ == "__main__":

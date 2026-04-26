@@ -18,7 +18,7 @@ class CompetencyResult(BaseModel):
     feedback: str = ""
 
 
-InteractionType = Literal['intro', 'diagnostic', 'teach', 'formative', 'revision', 'final_assessment']
+InteractionType = Literal['intro', 'diagnostic', 'teach', 'formative', 'revision', 'competency_assessment', 'final_assessment']
 
 
 STAGE_MAP = {

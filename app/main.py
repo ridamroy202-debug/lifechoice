@@ -2,7 +2,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from typing import Any, List, Optional
-from app.session_manager import create_session, get_session
+from app.session_manager import create_session, get_session, save_session
 from fastapi.responses import HTMLResponse, Response
 from app.certificates import (
     get_certificate,
@@ -25,6 +25,7 @@ from app.persistence import (
     create_remote_learning_session_ref,
     get_locked_rubric,
     get_learner_competency_progress,
+    get_remote_session_mapping,
     get_remote_learning_session_ref,
     get_unresolved_anomalies,
     list_badges,
@@ -35,6 +36,7 @@ from app.persistence import (
     upsert_learner,
     upsert_learner_competency_progress,
     upsert_locked_rubric,
+    upsert_remote_session_mapping,
 )
 from app.policy import build_gamification_payload, build_session_runtime_payload
 from app.remote_backend import RemoteBackendError, remote_backend_client
@@ -143,6 +145,21 @@ class AssessmentSubmitRequest(BaseModel):
         return str(self.answer or self.message or "")
 
 
+class SessionInteractRequest(BaseModel):
+    message: Optional[str] = None
+    answer: Optional[str] = None
+    response: Optional[str] = None
+    auth_token: Optional[str] = None
+
+    @property
+    def text(self) -> str:
+        return str(self.message or self.answer or self.response or "").strip()
+
+    @property
+    def has_text(self) -> bool:
+        return bool(self.text)
+
+
 class PreAssessmentQuestionsRequest(BaseModel):
     topic: str
     competencies: List[str]
@@ -233,6 +250,109 @@ def _require_phase(session, expected: str):
             status_code=400,
             detail=f"This endpoint requires phase '{expected}', but session is in phase '{session.phase}'."
         )
+
+
+def _session_history_payload(session, limit: int = 20) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": msg.role,
+            "content": msg.content,
+            "created_at": msg.created_at,
+        }
+        for msg in session.messages[-limit:]
+    ]
+
+
+def _current_pending_prompt(session) -> Optional[str]:
+    if session.phase == "pre_assessment":
+        return session.pre_assessment_prompt
+    if session.phase == "learning" and session.awaiting_formative_response:
+        return session.current_formative_prompt
+    if session.phase == "competency_assessment":
+        return session.current_assessment_prompt
+    if session.phase == "final_assessment":
+        return session.final_assessment_prompt
+    return None
+
+
+def _build_session_payload(session):
+    gamification = None
+    if session.current_remote_learning_session_id and session.remote_auth_token:
+        try:
+            gamification = remote_backend_client.fetch_gamification_progress(
+                session.current_remote_learning_session_id,
+                token=session.remote_auth_token,
+            )
+        except RemoteBackendError:
+            gamification = None
+
+    return {
+        "session_id": session.session_id,
+        "topic": session.topic,
+        "learner_id": session.learner_id,
+        "source": session.source,
+        "domain_id": session.domain_id,
+        "remote_micro_credential_id": session.remote_micro_credential_id,
+        "remote_micro_credential_level": session.remote_micro_credential_level,
+        "academic_stage": session.academic_stage,
+        "academic_guidance": session.academic_guidance,
+        "remote_access_id": session.remote_access_id,
+        "identity_verified": session.identity_verified,
+        "identity_verified_at": session.identity_verified_at,
+        "remote_sync": session.remote_sync_status,
+        "remote_last_event_at": session.remote_last_event_at,
+        "phase": session.phase,
+        "user_level": session.user_level,
+        "weak_areas": session.weak_areas,
+        "interaction_number": session.competency_interaction,
+        "interaction_type": session.current_interaction_type,
+        "delivery_format": session.current_delivery_format,
+        "formative_slot": session.formative_slot_number,
+        "required_next_action": session.required_next_action,
+        "pre_assessment_completed": session.pre_assessment_completed,
+        "current_difficulty": session.current_difficulty,
+        "formative_check_results": session.formative_check_results,
+        "awaiting_formative_response": session.awaiting_formative_response,
+        "current_formative_prompt": session.current_formative_prompt,
+        "revision_required": session.revision_required,
+        "final_assessment_unlocked": session.final_assessment_unlocked,
+        "current_assessment_attempts": session.current_assessment_attempts,
+        "current_assessment_prompt": session.current_assessment_prompt,
+        "final_assessment_prompt": session.final_assessment_prompt,
+        "final_assessment_attempts": session.final_assessment_attempts,
+        "personalization_state": session.personalization_state,
+        "competency": session.current_competency,
+        "current_competency": session.current_competency,
+        "current_remote_competency_id": session.current_remote_competency_id,
+        "current_remote_learning_session_id": session.current_remote_learning_session_id,
+        "competency_index": session.current_competency_index,
+        "current_subpart_index": session.current_subpart_index + 1,
+        "current_subpart": session.current_subpart,
+        "total_subparts": len(session.competency_subparts.get(session.current_competency, [])),
+        "total_competencies": len(session.competencies),
+        "pre_assessment_turn": session.pre_assessment_turn,
+        "learning_turn": session.learning_turn,
+        "max_learning_turns": session.max_learning_turns,
+        "max_competency_interactions": session.max_competency_interactions,
+        "chat_stage": session.chat_stage,
+        "bloom_level": session.bloom_level,
+        "is_doubt_phase": session.is_doubt_phase,
+        "backend_warnings": session.backend_warnings,
+        "competency_details": session.competency_details.get(session.current_competency, {}),
+        "delivery_format_history": session.delivery_format_history,
+        "concept_history": session.concept_history,
+        "completion_badge": session.completion_badge,
+        "gamification_progress": gamification,
+        "gamification": build_gamification_payload(session),
+        "earned_badges": list_badges(session.session_id),
+        "anomaly_flags": get_unresolved_anomalies(session.session_id),
+        "session_summary": session.session_summary,
+        "completed_competencies": [
+            {"competency": r.competency, "score": r.score, "passed": r.passed}
+            for r in session.completed_competencies
+        ],
+        "message_count": len(session.messages),
+    }
 
 
 def _extract_remote_catalog(payload: dict, domain_id: int, micro_credential_id: int) -> tuple[dict, dict]:
@@ -332,6 +452,121 @@ def _require_rubric_admin_key(provided_key: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="Invalid rubric administration key.")
 
 
+def _hydrate_session_from_remote_backend_session(remote_session_id: int, auth_token: Optional[str] = None):
+    mapping = get_remote_session_mapping(remote_session_id)
+    if mapping:
+        existing = get_session(mapping["local_session_id"])
+        if existing:
+            return existing
+
+    effective_token = auth_token or remote_backend_client.default_token or None
+    if not effective_token:
+        raise HTTPException(
+            status_code=400,
+            detail="auth_token is required to hydrate a backend session when no default backend token is configured.",
+        )
+
+    try:
+        remote_payload = remote_backend_client.fetch_learning_session(remote_session_id, token=effective_token)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    remote_session = remote_payload.get("session") if isinstance(remote_payload.get("session"), dict) else remote_payload
+    micro_credential_id = int(remote_session.get("micro_credential") or 0)
+    competency_id = int(remote_session.get("competency") or 0)
+    if not micro_credential_id or not competency_id:
+        raise HTTPException(status_code=502, detail="Remote backend session did not return micro-credential and competency identifiers.")
+
+    local_ref = get_remote_learning_session_ref(remote_session_id)
+    learner_id = local_ref.get("learner_id") if local_ref else None
+    domain_hint = local_ref.get("domain_id") if local_ref else None
+
+    try:
+        profile_payload = remote_backend_client.fetch_profile(token=effective_token)
+        profile_root = _extract_profile_root(profile_payload)
+        learner_id = learner_id or _extract_learner_id(profile_payload)
+        upsert_learner(learner_id, profile_root, verified=bool(learner_id))
+    except RemoteBackendError:
+        profile_root = {}
+    except HTTPException:
+        profile_root = {}
+
+    _, domain_entry, micro_entry = _resolve_remote_catalog(
+        micro_credential_id=micro_credential_id,
+        domain_id=domain_hint,
+    )
+    ordered_competencies = _ordered_competencies(micro_entry)
+    target = next((item for item in ordered_competencies if int(item.get("id", -1)) == competency_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Remote competency was not found in the lesson catalog.")
+
+    competency_title = str(target.get("title") or competency_id)
+    details = {
+        competency_title: {
+            "id": int(target.get("id", competency_id)),
+            "code": target.get("code"),
+            "description": target.get("description"),
+            "created_at": target.get("created_at"),
+            "updated_at": target.get("updated_at"),
+        }
+    }
+    topic = str(micro_entry.get("micro_credential") or micro_entry.get("name") or f"Micro-Credential {micro_credential_id}")
+    session = create_session(
+        topic=topic,
+        competencies=[competency_title],
+        source="remote",
+        domain_id=int(domain_entry.get("id", 0)) if domain_entry.get("id") is not None else None,
+        remote_micro_credential_id=micro_credential_id,
+        remote_micro_credential_level=micro_entry.get("level"),
+        remote_source=domain_entry.get("source"),
+        remote_auth_token=effective_token,
+        learner_profile=profile_root,
+        learner_id=learner_id,
+        identity_verified=bool(learner_id),
+        identity_verified_at=profile_root.get("updated_at") if profile_root else None,
+        competency_details=details,
+        remote_learning_sessions={competency_title: int(remote_session_id)},
+    )
+    if isinstance(remote_session.get("attempt_number"), int):
+        session.competency_attempts[competency_title] = int(remote_session["attempt_number"])
+    if remote_session.get("interactions"):
+        session.backend_warnings.append(
+            "Hydrated from backend session with existing remote interactions; local learning flow is restarting from the beginning for authoritative progression."
+        )
+    create_remote_learning_session_ref(
+        remote_session_id,
+        learner_id or f"remote-session-{remote_session_id}",
+        micro_credential_id,
+        competency_id,
+        competency_title,
+        domain_id=int(domain_entry.get("id", 0)) if domain_entry.get("id") is not None else None,
+    )
+    upsert_remote_session_mapping(remote_session_id, session.session_id)
+    save_session(session)
+    _log_event(
+        session.session_id,
+        session.learner_id,
+        f"/session/{remote_session_id}/interact",
+        "remote_session_hydrated",
+        {
+            "remote_session_id": remote_session_id,
+            "micro_credential_id": micro_credential_id,
+            "competency_id": competency_id,
+            "competency": competency_title,
+        },
+    )
+    return session
+
+
+def _get_session_for_interact(session_id: str, auth_token: Optional[str] = None):
+    session = get_session(session_id)
+    if session:
+        return session
+    if session_id.isdigit():
+        return _hydrate_session_from_remote_backend_session(int(session_id), auth_token)
+    raise HTTPException(status_code=404, detail="Session not found.")
+
+
 # ── Routes ────────────────────────────────────────────────────────────────
 
 
@@ -368,13 +603,36 @@ def start_session(req: StartSessionRequest):
         if not competency_titles:
             raise HTTPException(status_code=400, detail="Remote micro-credential has no competencies")
         missing_rubrics = missing_locked_rubrics(competency_titles)
+        unresolved_missing_rubrics = list(missing_rubrics)
         if missing_rubrics:
+            unresolved_missing_rubrics = []
+            title_to_remote_id = {
+                str(item.get("title")): int(item.get("id"))
+                for item in ordered_competencies
+                if item.get("title") and item.get("id") is not None
+            }
+            for competency_title in missing_rubrics:
+                remote_competency_id = title_to_remote_id.get(competency_title)
+                if not remote_competency_id:
+                    unresolved_missing_rubrics.append(competency_title)
+                    continue
+                try:
+                    rubric_payload = remote_backend_client.fetch_competency_rubric(
+                        remote_competency_id,
+                        token=effective_token,
+                    )
+                except RemoteBackendError:
+                    unresolved_missing_rubrics.append(competency_title)
+                    continue
+                if not (rubric_payload.get("rubric_rules") or {}).get("rubric_rules"):
+                    unresolved_missing_rubrics.append(competency_title)
+        if unresolved_missing_rubrics:
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "message": "Locked rubrics are missing for this micro-credential. Provision them before launch.",
+                    "message": "Locked rubrics are missing for this micro-credential and no remote rubric rules were available.",
                     "micro_credential_id": req.micro_credential_id,
-                    "missing_competencies": missing_rubrics,
+                    "missing_competencies": unresolved_missing_rubrics,
                 },
             )
 
@@ -593,17 +851,16 @@ def backend_lesson_competencies_post(req: BackendLessonCompetenciesRequest):
 
 @app.get(
     "/backend/lesson/rubric/{competency_id}",
-    summary="Remote rubric proxy is currently unsupported",
+    summary="Proxy rubric rules for a remote competency",
     tags=["Remote Backend"],
 )
-def backend_lesson_rubric(competency_id: int):
-    raise HTTPException(
-        status_code=501,
-        detail=(
-            "Remote rubric lookup is disabled because the live LifeChoice backend Swagger schema "
-            "does not currently expose a rubric-by-competency route."
-        ),
-    )
+def backend_lesson_rubric(competency_id: int, auth_token: Optional[str] = Query(None)):
+    effective_token = _resolve_effective_token(auth_token)
+    try:
+        payload = remote_backend_client.fetch_competency_rubric(competency_id, token=effective_token)
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return payload
 
 
 @app.get(
@@ -1004,6 +1261,68 @@ async def learn_chat(req: LearnChatRequest):
 
 
 @app.post(
+    "/session/{session_id}/interact",
+    summary="Unified learner interaction route",
+    tags=["Sessions"],
+)
+async def session_interact(session_id: str, req: Optional[SessionInteractRequest] = None):
+    payload = req or SessionInteractRequest()
+    session = _get_session_for_interact(session_id, payload.auth_token)
+
+    if not payload.has_text:
+        preassessment_started = None
+        if session.phase == "pre_assessment" and not session.pre_assessment_prompt:
+            preassessment_started = await handle_pre_assessment_start(session)
+            _log_event(
+                session.session_id,
+                session.learner_id,
+                f"/session/{session_id}/interact",
+                "pre_assessment_started_via_interact",
+                {"competency": session.current_competency},
+            )
+        return {
+            **_build_session_payload(session),
+            "counted_as_interaction": False,
+            "history": _session_history_payload(session),
+            "current_prompt": _current_pending_prompt(session),
+            "interaction_result": preassessment_started,
+        }
+
+    if session.phase == "pre_assessment":
+        response = await handle_pre_assessment(session, payload.text)
+        event_type = "pre_assessment_answered_via_interact"
+    elif session.phase == "learning":
+        response = await handle_learning(session, payload.text)
+        event_type = "learning_turn_via_interact"
+    elif session.phase == "competency_assessment":
+        response = await handle_competency_assessment(session, payload.text)
+        event_type = "competency_assessed_via_interact"
+    elif session.phase == "final_assessment":
+        response = await handle_final_assessment(session, payload.text)
+        event_type = "final_assessment_submitted_via_interact"
+    else:
+        raise HTTPException(status_code=400, detail="Session is already completed. No further interactions are allowed.")
+
+    _log_event(
+        session.session_id,
+        session.learner_id,
+        f"/session/{session_id}/interact",
+        event_type,
+        {
+            "phase": session.phase,
+            "competency": session.current_competency if session.phase != "completed" else None,
+            "counted_as_interaction": True,
+        },
+    )
+    return {
+        **response,
+        "counted_as_interaction": True,
+        "history": _session_history_payload(session),
+        "current_prompt": _current_pending_prompt(session),
+    }
+
+
+@app.post(
     "/assessment/competency",
     summary="Submit competency assessment answer",
     tags=["Assessments"],
@@ -1103,80 +1422,4 @@ def get_session_status(session_id: str):
     phase, current competency, turn counts, level, scores so far.
     """
     session = _get_or_404(session_id)
-    gamification = None
-    if session.current_remote_learning_session_id and session.remote_auth_token:
-        try:
-            gamification = remote_backend_client.fetch_gamification_progress(
-                session.current_remote_learning_session_id,
-                token=session.remote_auth_token,
-            )
-        except RemoteBackendError:
-            gamification = None
-
-    return {
-        "session_id": session.session_id,
-        "topic": session.topic,
-        "learner_id": session.learner_id,
-        "source": session.source,
-        "domain_id": session.domain_id,
-        "remote_micro_credential_id": session.remote_micro_credential_id,
-        "remote_micro_credential_level": session.remote_micro_credential_level,
-        "academic_stage": session.academic_stage,
-        "academic_guidance": session.academic_guidance,
-        "remote_access_id": session.remote_access_id,
-        "identity_verified": session.identity_verified,
-        "identity_verified_at": session.identity_verified_at,
-        "remote_sync": session.remote_sync_status,
-        "remote_last_event_at": session.remote_last_event_at,
-        "phase": session.phase,
-        "user_level": session.user_level,
-        "weak_areas": session.weak_areas,
-        "interaction_number": session.competency_interaction,
-        "interaction_type": session.current_interaction_type,
-        "delivery_format": session.current_delivery_format,
-        "formative_slot": session.formative_slot_number,
-        "required_next_action": session.required_next_action,
-        "pre_assessment_completed": session.pre_assessment_completed,
-        "current_difficulty": session.current_difficulty,
-        "formative_check_results": session.formative_check_results,
-        "awaiting_formative_response": session.awaiting_formative_response,
-        "current_formative_prompt": session.current_formative_prompt,
-        "revision_required": session.revision_required,
-        "final_assessment_unlocked": session.final_assessment_unlocked,
-        "current_assessment_attempts": session.current_assessment_attempts,
-        "current_assessment_prompt": session.current_assessment_prompt,
-        "final_assessment_prompt": session.final_assessment_prompt,
-        "final_assessment_attempts": session.final_assessment_attempts,
-        "personalization_state": session.personalization_state,
-        "competency": session.current_competency,
-        "current_competency": session.current_competency,
-        "current_remote_competency_id": session.current_remote_competency_id,
-        "current_remote_learning_session_id": session.current_remote_learning_session_id,
-        "competency_index": session.current_competency_index,
-        "current_subpart_index": session.current_subpart_index + 1,
-        "current_subpart": session.current_subpart,
-        "total_subparts": len(session.competency_subparts.get(session.current_competency, [])),
-        "total_competencies": len(session.competencies),
-        "pre_assessment_turn": session.pre_assessment_turn,
-        "learning_turn": session.learning_turn,
-        "max_learning_turns": session.max_learning_turns,
-        "max_competency_interactions": session.max_competency_interactions,
-        "chat_stage": session.chat_stage,
-        "bloom_level": session.bloom_level,
-        "is_doubt_phase": session.is_doubt_phase,
-        "backend_warnings": session.backend_warnings,
-        "competency_details": session.competency_details.get(session.current_competency, {}),
-        "delivery_format_history": session.delivery_format_history,
-        "concept_history": session.concept_history,
-        "completion_badge": session.completion_badge,
-        "gamification_progress": gamification,
-        "gamification": build_gamification_payload(session),
-        "earned_badges": list_badges(session.session_id),
-        "anomaly_flags": get_unresolved_anomalies(session.session_id),
-        "session_summary": session.session_summary,
-        "completed_competencies": [
-            {"competency": r.competency, "score": r.score, "passed": r.passed}
-            for r in session.completed_competencies
-        ],
-        "message_count": len(session.messages),
-    }
+    return _build_session_payload(session)

@@ -183,6 +183,7 @@ ai_tutor_task:
     Session context:
     - Topic: {topic}
     - Competency: {competency}
+    - Backend competency description: {competency_description}
     - Learner level: {user_level}
     - Weak areas: {weak_areas}
     - Competency interaction number: {interaction_number}
@@ -202,6 +203,11 @@ ai_tutor_task:
     - Interaction goal: {interaction_goal}
     - Include formative check: {include_formative_check}
     - Revision required: {revision_required}
+    - Stage instruction: {stage_instruction}
+    - Previous delivery modes already used: {previous_delivery_modes}
+    - Minimum response length: {response_word_floor} words
+    - Target response length: {response_word_target} words
+    - Maximum response length: {response_word_ceiling} words
 
     Conversation so far:
     {chat_history}
@@ -216,29 +222,38 @@ ai_tutor_task:
     {study_material}
 
     Response rules:
-    - Teach exactly one concept in this interaction
-    - Be warm, appreciative, and direct
+    - Teach exactly one concept in this interaction and do not drift into a second concept
+    - Be warm, appreciative, specific, and never robotic
+    - Personalization logic comes from the backend fields above; follow them exactly rather than inventing a new policy
+    - Anchor the teaching to the backend competency description so the lesson stays aligned with the official competency scope
     - Keep the teaching personalized to the learner's current difficulty tier
     - Match the intellectual depth to the academic stage:
       bachelor = scaffold clearly and connect theory to practice
       masters = expect stronger reasoning and defend choices explicitly
       phd = include critique, limitations, edge cases, and expert synthesis
-    - Give immediate feedback if formative_feedback contains assessment of the learner answer
+    - Follow the stage instruction exactly
+    - If the learner answered in the previous turn, start with specific feedback on what was correct, what was incomplete, and why
     - Use markdown headings and bullets
+    - Use the requested delivery mode and make sure it is meaningfully different from the previous delivery modes
     - Use at least one multimodal teaching artifact: table, steps, comparison, worked example, mini scenario, or formula walkthrough
     - If the competency is technical, stay technically correct but beginner-friendly
+    - Make the teaching university-grade: explain mechanisms, decision logic, common failure points, and practical consequences
+    - Reuse the wording and intent of the backend competency description when defining the objective, scope, and applied examples
+    - Keep the response within the provided length band and make it materially informative, not brief
     - End with a precise learner action
-    - If include_formative_check is yes, end with a section titled **Formative Check** and ask one applied question only
+    - If include_formative_check is yes, end with a section titled **Formative Check** and ask one applied retrieval question only
 
     Required structure:
-    1. Title
-    2. What this concept means
-    3. How it works
-    4. Practical example or visual aid
-    5. Feedback or rule of thumb
-    6. Next learner action
+    1. ## Title
+    2. ## Learner Feedback
+    3. ## What This Concept Means
+    4. ## How It Works
+    5. ## Visual Aid
+    6. ## Example
+    7. ## Key Takeaway
+    8. ## Next Learner Action
   expected_output: >
-    A structured markdown teaching response that teaches one concept, uses a clear visual aid or example, and optionally ends with a **Formative Check** section.
+    A structured markdown teaching response that teaches one concept in depth, gives immediate feedback, uses a clear visual aid or example, and optionally ends with a **Formative Check** section.
 # ─── Assessment Evaluation Task ──────────────────────────────────────────────
 assessment_eval_task:
   description: >

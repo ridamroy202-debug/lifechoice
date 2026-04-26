@@ -94,42 +94,6 @@ jobs:
   deploy:
     name: Deploy to EC2
     needs: docker
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Deploy latest image on server
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          port: ${{ secrets.EC2_PORT || '22' }}
-          script: |
-            set -e
-            echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-            sudo docker pull ${{ env.DOCKERHUB_IMAGE }}:latest
-            sudo docker stop lifechoice-ai-engine || true
-            sudo docker rm lifechoice-ai-engine || true
-            sudo docker run -d \
-              --name lifechoice-ai-engine \
-              --restart unless-stopped \
-              -p 80:8000 \
-              -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
-              -e ANTHROPIC_API_KEY="${{ secrets.ANTHROPIC_API_KEY }}" \
-              -e MODEL_NAME="${{ secrets.MODEL_NAME }}" \
-              -e OPENAI_COMPLEX_MODEL="${{ secrets.OPENAI_COMPLEX_MODEL }}" \
-              -e ANTHROPIC_MODEL="${{ secrets.ANTHROPIC_MODEL }}" \
-              -e LOG_LEVEL="${{ secrets.LOG_LEVEL }}" \
-              -e REMOTE_BACKEND_URL="${{ secrets.REMOTE_BACKEND_URL }}" \
-              -e REMOTE_API_TOKEN="${{ secrets.REMOTE_API_TOKEN }}" \
-              -e RUBRIC_ADMIN_KEY="${{ secrets.RUBRIC_ADMIN_KEY }}" \
-              -e CORS_ALLOWED_ORIGINS="${{ secrets.CORS_ALLOWED_ORIGINS }}" \
-              ${{ env.DOCKERHUB_IMAGE }}:latest
-
-  deploy:
-    name: Deploy to EC2
-    needs: docker
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 

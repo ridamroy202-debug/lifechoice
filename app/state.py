@@ -34,6 +34,25 @@ STREAK_BONUS_POINTS = 5
 STREAK_BONUS_THRESHOLD = 3
 
 
+AIP_NAME_MAP: Dict[str, str] = {
+    "AIP-01": "Introduction",
+    "AIP-02": "Diagnostic Check",
+    "AIP-03": "Core Teaching",
+    "AIP-04": "Worked Example",
+    "AIP-05": "FA1 Generation",
+    "AIP-06": "FA1 Feedback",
+    "AIP-07": "FA2 Generation",
+    "AIP-08": "FA2 Feedback",
+    "AIP-09": "FA3 Generation",
+    "AIP-10": "FA3 Feedback",
+    "AIP-11": "Summative Assessment",
+    "AIP-12": "Summative Feedback",
+    "AIP-13": "Competency Summary",
+    "AIP-14": "MC Completion Reflection",
+}
+MAX_NAMED_AIPS_PER_COMPETENCY = 14
+
+
 def _get_stage_info(turn: int) -> tuple[str, str]:
     for stage_name, info in STAGE_MAP.items():
         low, high = info['turns']
@@ -124,6 +143,20 @@ class LearnerSession(BaseModel):
     )
     remote_last_event_at: Optional[str] = None
     session_summary: Dict[str, Any] = Field(default_factory=dict)
+    current_aip_code: Optional[str] = None
+    current_aip_name: Optional[str] = None
+    competency_aip_history: List[Dict[str, Any]] = Field(default_factory=list)
+    all_aip_history: List[Dict[str, Any]] = Field(default_factory=list)
+    competency_aip_codes_fired: List[str] = Field(default_factory=list)
+    live_aip_call_history: List[Dict[str, Any]] = Field(default_factory=list)
+    mc_completion_reflection_fired: bool = False
+    latest_binary_outcome: Optional[str] = None
+    developing_competency_active: bool = False
+    developing_competency_reason: Optional[str] = None
+    local_assessment_passed: Optional[bool] = None
+    remote_assessment_synced: bool = False
+    remote_assessment_passed: Optional[bool] = None
+    current_assessment_sync_error: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     completed_at: Optional[str] = None
@@ -262,6 +295,14 @@ class LearnerSession(BaseModel):
             return None
         return self.current_formative_slot + 1
 
+    @property
+    def competency_aip_count(self) -> int:
+        return len(self.competency_aip_codes_fired)
+
+    @property
+    def aip_budget_total(self) -> int:
+        return MAX_NAMED_AIPS_PER_COMPETENCY
+
     def format_recent_history(self, n: int = 10) -> str:
         if not self.messages:
             return 'No conversation yet.'
@@ -274,6 +315,62 @@ class LearnerSession(BaseModel):
     def add_message(self, role: str, content: str):
         self.messages.append(ChatMessage(role=role, content=content))
         self.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def record_aip_event(
+        self,
+        *,
+        aip_code: str,
+        trigger: str,
+        scope: Literal["cc", "mc"] = "cc",
+        outcome: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if scope == "cc" and aip_code in self.competency_aip_codes_fired:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "aip_code": aip_code,
+            "aip_name": AIP_NAME_MAP.get(aip_code, aip_code),
+            "trigger": trigger,
+            "scope": scope,
+            "competency": self.current_competency,
+            "phase": self.phase,
+            "interaction_number": self.competency_interaction,
+            "outcome": outcome,
+            "created_at": now,
+            "metadata": metadata or {},
+        }
+        self.current_aip_code = entry["aip_code"]
+        self.current_aip_name = entry["aip_name"]
+        self.all_aip_history.append(entry)
+        if scope == "cc":
+            self.competency_aip_history.append(entry)
+            self.competency_aip_codes_fired.append(aip_code)
+        else:
+            self.mc_completion_reflection_fired = True
+        self.updated_at = now
+
+    def record_live_aip_call(
+        self,
+        *,
+        aip_code: str,
+        purpose: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self.live_aip_call_history.append(
+            {
+                "aip_code": aip_code,
+                "aip_name": AIP_NAME_MAP.get(aip_code, aip_code),
+                "purpose": purpose,
+                "competency": self.current_competency,
+                "phase": self.phase,
+                "interaction_number": self.competency_interaction,
+                "created_at": now,
+                "metadata": metadata or {},
+            }
+        )
+        self.updated_at = now
 
     def record_interaction_event(
         self,
@@ -403,4 +500,16 @@ class LearnerSession(BaseModel):
         self.current_interaction_type = 'intro'
         self.current_delivery_format = None
         self.consecutive_easy_passes = 0
+        self.current_aip_code = None
+        self.current_aip_name = None
+        self.competency_aip_history = []
+        self.competency_aip_codes_fired = []
+        self.live_aip_call_history = []
+        self.latest_binary_outcome = None
+        self.developing_competency_active = False
+        self.developing_competency_reason = None
+        self.local_assessment_passed = None
+        self.remote_assessment_synced = False
+        self.remote_assessment_passed = None
+        self.current_assessment_sync_error = None
         self.updated_at = datetime.now(timezone.utc).isoformat()

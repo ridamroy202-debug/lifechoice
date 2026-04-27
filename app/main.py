@@ -2,6 +2,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from typing import Any, List, Optional
+import re
 from app.session_manager import create_session, get_session, save_session
 from fastapi.responses import HTMLResponse, Response
 from app.certificates import (
@@ -86,6 +87,39 @@ app.add_middleware(
 
 configure_logging()
 
+_PLACEHOLDER_MESSAGES = {
+    "string",
+    "message",
+    "answer",
+    "response",
+    "text",
+    "your interaction content",
+    "test",
+    "testing",
+    "hello",
+    "hi",
+    "ok",
+    "okay",
+    "yes",
+    "no",
+    "n/a",
+    "na",
+    "none",
+}
+
+
+def _is_meaningful_message(value: str | None) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered in _PLACEHOLDER_MESSAGES:
+        return False
+    tokens = re.findall(r"[a-z0-9]+", lowered)
+    if len(tokens) <= 1 and len(text) < 12:
+        return False
+    return True
+
 
 @app.on_event("startup")
 def startup_event():
@@ -153,11 +187,18 @@ class SessionInteractRequest(BaseModel):
 
     @property
     def text(self) -> str:
-        return str(self.message or self.answer or self.response or "").strip()
+        for candidate in (self.message, self.answer, self.response):
+            text = str(candidate or "").strip()
+            if text:
+                return text
+        return ""
 
     @property
     def has_text(self) -> bool:
-        return bool(self.text)
+        for candidate in (self.message, self.answer, self.response):
+            if _is_meaningful_message(candidate):
+                return True
+        return False
 
 
 class PreAssessmentQuestionsRequest(BaseModel):
@@ -341,8 +382,23 @@ def _build_session_payload(session):
         "interaction_number": session.competency_interaction,
         "interaction_type": session.current_interaction_type,
         "delivery_format": session.current_delivery_format,
+        "current_aip_code": session.current_aip_code,
+        "current_aip_name": session.current_aip_name,
+        "aip_budget_total": session.aip_budget_total,
+        "competency_aip_count": session.competency_aip_count,
+        "competency_aip_history": session.competency_aip_history,
+        "live_aip_call_count": len(session.live_aip_call_history),
+        "mc_completion_reflection_fired": session.mc_completion_reflection_fired,
+        "latest_binary_outcome": session.latest_binary_outcome,
+        "developing_competency_active": session.developing_competency_active,
+        "developing_competency_reason": session.developing_competency_reason,
+        "local_assessment_passed": session.local_assessment_passed,
+        "remote_assessment_synced": session.remote_assessment_synced,
+        "remote_assessment_passed": session.remote_assessment_passed,
+        "current_assessment_sync_error": session.current_assessment_sync_error,
         "formative_slot": session.formative_slot_number,
         "required_next_action": session.required_next_action,
+        "unlimited_attempts": True,
         "pre_assessment_completed": session.pre_assessment_completed,
         "current_difficulty": session.current_difficulty,
         "formative_check_results": session.formative_check_results,
@@ -387,6 +443,28 @@ def _build_session_payload(session):
         ],
         "message_count": len(session.messages),
     }
+
+
+def _build_interact_response(session, response: Optional[dict[str, Any]], *, counted_as_interaction: bool):
+    payload = _build_session_payload(session)
+    response = response or {}
+    for key, value in response.items():
+        if key in {"counted_as_interaction", "history", "current_prompt", "interaction_result"}:
+            continue
+        if key not in payload:
+            payload[key] = value
+
+    if "message" in response:
+        payload["message"] = response["message"]
+    if "interaction_result" in response:
+        payload["interaction_result"] = response["interaction_result"]
+    else:
+        payload["interaction_result"] = None
+
+    payload["counted_as_interaction"] = counted_as_interaction
+    payload["history"] = _session_history_payload(session)
+    payload["current_prompt"] = _current_pending_prompt(session)
+    return payload
 
 
 def _extract_remote_catalog(payload: dict, domain_id: int, micro_credential_id: int) -> tuple[dict, dict]:
@@ -599,6 +677,15 @@ def _get_session_for_interact(session_id: str, auth_token: Optional[str] = None)
     if session_id.isdigit():
         return _hydrate_session_from_remote_backend_session(int(session_id), auth_token)
     raise HTTPException(status_code=404, detail="Session not found.")
+
+
+async def _ensure_interact_bootstrap(session) -> bool:
+    if session.phase != "pre_assessment":
+        return False
+    if session.intro_delivered and session.pre_assessment_prompt:
+        return False
+    await handle_pre_assessment_start(session)
+    return True
 
 
 # ── Routes ────────────────────────────────────────────────────────────────
@@ -1302,15 +1389,10 @@ async def learn_chat(req: LearnChatRequest):
 async def session_interact(session_id: str, req: Optional[SessionInteractRequest] = None):
     payload = req or SessionInteractRequest()
     session = _get_session_for_interact(session_id, payload.auth_token)
+    bootstrapped = await _ensure_interact_bootstrap(session)
 
-    if not payload.has_text:
-        return {
-            **_build_session_payload(session),
-            "counted_as_interaction": False,
-            "history": _session_history_payload(session),
-            "current_prompt": _current_pending_prompt(session),
-            "interaction_result": None,
-        }
+    if not payload.has_text or bootstrapped:
+        return _build_interact_response(session, None, counted_as_interaction=False)
 
     if session.phase == "pre_assessment":
         response = await handle_pre_assessment(session, payload.text)
@@ -1327,6 +1409,8 @@ async def session_interact(session_id: str, req: Optional[SessionInteractRequest
     else:
         raise HTTPException(status_code=400, detail="Session is already completed. No further interactions are allowed.")
 
+    counted_as_interaction = bool(response.pop("counted_as_interaction", True))
+
     _log_event(
         session.session_id,
         session.learner_id,
@@ -1335,15 +1419,10 @@ async def session_interact(session_id: str, req: Optional[SessionInteractRequest
         {
             "phase": session.phase,
             "competency": session.current_competency if session.phase != "completed" else None,
-            "counted_as_interaction": True,
+            "counted_as_interaction": counted_as_interaction,
         },
     )
-    return {
-        **response,
-        "counted_as_interaction": True,
-        "history": _session_history_payload(session),
-        "current_prompt": _current_pending_prompt(session),
-    }
+    return _build_interact_response(session, response, counted_as_interaction=counted_as_interaction)
 
 
 @app.post(

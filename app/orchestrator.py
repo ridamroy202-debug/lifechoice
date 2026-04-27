@@ -10,10 +10,7 @@ import yaml
 
 from app.crews.ai_tutor_agents_crew import TutorCrew
 from app.crews.assessment_crew import AssessmentCrew
-from app.crews.learning_path_planner import PathPlnner
-from app.crews.level_classifier_crew import LevelClassifierCrew
 from app.crews.pre_assessment_crew import PreAssessCrew
-from app.crews.studey_materils_crew import StudyMeterial
 from app.persistence import (
     append_event_log,
     create_badge,
@@ -96,6 +93,24 @@ _FORMATIVE_VISUAL_ELEMENT_KEYWORDS = {
     "layout", "layouts", "grid", "grids", "illustration", "illustrations", "photography",
     "shape", "shapes", "mark", "wordmark", "visual", "voice", "messaging",
 }
+COMPETENT_LABEL = "COMPETENT"
+NOT_YET_COMPETENT_LABEL = "NOT YET COMPETENT"
+LIVE_AI_AIP_CODES = frozenset(
+    {
+        "AIP-02",
+        "AIP-03",
+        "AIP-04",
+        "AIP-05",
+        "AIP-06",
+        "AIP-07",
+        "AIP-08",
+        "AIP-09",
+        "AIP-10",
+        "AIP-11",
+        "AIP-12",
+        "AIP-14",
+    }
+)
 
 
 def _load_all_rubrics() -> dict[str, Any]:
@@ -289,6 +304,129 @@ def _record_session_interaction(
     )
 
 
+def _binary_outcome_label(passed: bool) -> str:
+    return COMPETENT_LABEL if passed else NOT_YET_COMPETENT_LABEL
+
+
+def _run_mapped_ai_call(
+    session: LearnerSession,
+    aip_code: str,
+    *,
+    purpose: str,
+    crew_factory,
+    inputs: dict[str, Any],
+) -> Any:
+    if aip_code not in LIVE_AI_AIP_CODES:
+        raise RuntimeError(f"Unmapped AI call attempted for {aip_code}.")
+    session.record_live_aip_call(aip_code=aip_code, purpose=purpose, metadata={"input_keys": sorted(inputs.keys())})
+    return crew_factory().crew().kickoff(inputs=inputs)
+
+
+def _record_aip(
+    session: LearnerSession,
+    aip_code: str,
+    *,
+    trigger: str,
+    scope: str = "cc",
+    outcome: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    session.record_aip_event(
+        aip_code=aip_code,
+        trigger=trigger,
+        scope=scope,  # type: ignore[arg-type]
+        outcome=outcome,
+        metadata=metadata,
+    )
+
+
+def _build_static_study_material(session: LearnerSession, competency: str, context_description: str) -> str:
+    description = context_description or f"Use {competency} to deliver measurable professional outcomes."
+    weak_focus = ", ".join(session.weak_areas[:3]) or "scope, stakeholders, and measurable outcomes"
+    return (
+        f"# {competency}\n\n"
+        f"## Core Definition\n{description}\n\n"
+        f"## Why It Matters\n"
+        f"This competency matters in {session.topic} because it turns planning into repeatable delivery decisions.\n\n"
+        f"## Core Focus Areas\n"
+        f"- Objective and scope clarity\n"
+        f"- Stakeholder alignment\n"
+        f"- Measurable outcomes and review points\n"
+        f"- Common failure patterns: {weak_focus}\n"
+    )
+
+
+def _build_static_learning_plan(session: LearnerSession, competency: str, context_description: str) -> str:
+    description = context_description or f"Apply {competency.lower()} in a professional setting."
+    return "\n".join(
+        [
+            f"1. First concept and intuition - explain the core purpose of {competency} in practical terms.",
+            f"2. Mechanism and workflow - show the repeatable steps used to perform {competency.lower()} well.",
+            f"3. Worked example - walk through a realistic scenario using {competency.lower()} and measurable outcomes.",
+            f"4. Decision quality - compare strong versus weak choices, tradeoffs, and stakeholder implications in {competency.lower()}.",
+            f"5. Common mistakes and recovery - identify predictable errors and how to correct them in {competency.lower()}.",
+            f"6. Assessment readiness - consolidate the key ideas from: {description}",
+        ]
+    )
+
+
+def _derive_default_weak_areas(session: LearnerSession) -> list[str]:
+    competency = session.current_competency.lower()
+    return [
+        f"understanding of {competency} principles",
+        "application of measurable outcomes in decisions",
+        "clear justification of chosen actions",
+    ]
+
+
+def _classify_answer_depth(answer: str) -> str:
+    lowered = answer.lower()
+    advanced_markers = ("tradeoff", "constraint", "risk", "dependency", "mitigate", "measure", "metric")
+    intermediate_markers = ("because", "stakeholder", "scope", "priority", "outcome", "plan")
+    if sum(marker in lowered for marker in advanced_markers) >= 2:
+        return "advanced"
+    if sum(marker in lowered for marker in intermediate_markers) >= 2:
+        return "intermediate"
+    return "beginner"
+
+    _log_session_event(
+        session,
+        "/aip",
+        "aip_recorded",
+        {
+            "aip_code": aip_code,
+            "trigger": trigger,
+            "scope": scope,
+            "outcome": outcome,
+            "metadata": metadata or {},
+        },
+    )
+
+
+def _build_static_remediation_message(
+    session: LearnerSession,
+    *,
+    title: str,
+    summary: str,
+    weakest_focus: str,
+) -> str:
+    competency = session.current_competency
+    return (
+        f"## {title}\n\n"
+        f"### Developing Competency\n"
+        f"You are not yet competent in **{competency}**. Review this targeted guidance before reattempting.\n\n"
+        f"### What needs attention\n"
+        f"{summary}\n\n"
+        f"### Remedial focus\n"
+        f"- Re-state the goal of **{competency}** in your own words.\n"
+        f"- Work through one concrete example focused on: {weakest_focus}.\n"
+        f"- Explain why your chosen action fits the scenario, not just what you would do.\n"
+        f"- Prepare a tighter, evidence-based answer before the next gate.\n\n"
+        "### Next step\n"
+        "Use the next interaction to show a clearer and more applied response."
+    )
+
+
 def _sync_prompt_with_metadata(session: LearnerSession, ai_prompt: str, interaction_type: str) -> str:
     payload = {
         "interaction_type": interaction_type,
@@ -326,6 +464,176 @@ def _set_remote_sync_failure(session: LearnerSession, warning: str, remote_sessi
     )
 
 
+def _extract_remote_learning_session(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not payload:
+        return {}
+    session_payload = payload.get("session") if isinstance(payload.get("session"), dict) else payload
+    return session_payload if isinstance(session_payload, dict) else {}
+
+
+def _remote_competency_pass_confirmed(remote_session: dict[str, Any]) -> bool | None:
+    if not remote_session:
+        return None
+    mastery = remote_session.get("mastery_achieved")
+    status = str(remote_session.get("status") or "").strip().lower()
+    if mastery is True or status == "completed":
+        return True
+    if mastery is False or status in {"active", "in_progress", "failed", "pending"}:
+        return False
+    return None
+
+
+def _sync_remote_competency_assessment(
+    session: LearnerSession,
+    *,
+    competency: str,
+    remote_required: bool,
+    remote_learning_session_id: int | None,
+    prompt: str,
+    user_answer: str,
+    overall: float,
+    summary: str,
+    local_passed: bool,
+) -> dict[str, Any]:
+    session.local_assessment_passed = local_passed
+    session.remote_assessment_synced = False
+    session.remote_assessment_passed = None
+    session.current_assessment_sync_error = None
+
+    if not remote_learning_session_id:
+        if remote_required:
+            warning = f"Remote assessment sync failed for '{competency}': no remote learning session is available."
+            session.current_assessment_sync_error = warning
+            _set_remote_sync_failure(session, warning, None)
+            _log_session_event(
+                session,
+                "/assessment/competency",
+                "remote_assessment_sync_failed",
+                {
+                    "competency": competency,
+                    "remote_session_id": None,
+                    "local_passed": local_passed,
+                    "local_score": overall,
+                    "warning": warning,
+                },
+            )
+            return {
+                "remote_required": True,
+                "confirmed": None,
+                "remote_passed": None,
+                "remote_session": None,
+                "submit_response": None,
+                "fetch_response": None,
+                "warning": warning,
+            }
+        return {
+            "remote_required": False,
+            "confirmed": local_passed,
+            "remote_passed": None,
+            "remote_session": None,
+            "submit_response": None,
+            "fetch_response": None,
+            "warning": None,
+        }
+
+    submit_payload = {
+        "session_id": remote_learning_session_id,
+        "scenario_question": prompt,
+        "learner_response": user_answer,
+        "rubric_score": overall,
+        "ai_feedback": summary,
+    }
+    _log_session_event(
+        session,
+        "/assessment/competency",
+        "remote_assessment_sync_started",
+        {
+            "competency": competency,
+            "remote_session_id": remote_learning_session_id,
+            "local_passed": local_passed,
+            "local_score": overall,
+            "payload": submit_payload,
+        },
+    )
+
+    try:
+        submit_response = remote_backend_client.submit_assessment(
+            session_id=remote_learning_session_id,
+            scenario_question=prompt,
+            learner_response=user_answer,
+            rubric_score=overall,
+            ai_feedback=summary,
+            token=session.remote_auth_token,
+        )
+        fetch_response = remote_backend_client.fetch_learning_session(
+            remote_learning_session_id,
+            token=session.remote_auth_token,
+        )
+    except RemoteBackendError as exc:
+        warning = f"Remote assessment sync failed for '{competency}': {exc}"
+        session.current_assessment_sync_error = warning
+        _set_remote_sync_failure(session, warning, remote_learning_session_id)
+        _log_session_event(
+            session,
+            "/assessment/competency",
+            "remote_assessment_sync_failed",
+            {
+                "competency": competency,
+                "remote_session_id": remote_learning_session_id,
+                "local_passed": local_passed,
+                "local_score": overall,
+                "payload": submit_payload,
+                "warning": warning,
+            },
+        )
+        return {
+            "remote_required": True,
+            "confirmed": None,
+            "remote_passed": None,
+            "remote_session": None,
+            "submit_response": None,
+            "fetch_response": None,
+            "warning": warning,
+        }
+
+    remote_session = _extract_remote_learning_session(fetch_response)
+    remote_passed = _remote_competency_pass_confirmed(remote_session)
+    session.remote_assessment_synced = True
+    session.remote_assessment_passed = remote_passed
+    if remote_passed is None:
+        warning = f"Remote assessment confirmation for '{competency}' was inconclusive."
+        session.current_assessment_sync_error = warning
+        _set_remote_sync_failure(session, warning, remote_learning_session_id)
+    else:
+        session.current_assessment_sync_error = None
+        _set_remote_sync_success(session, remote_learning_session_id)
+
+    _log_session_event(
+        session,
+        "/assessment/competency",
+        "remote_assessment_sync_completed",
+        {
+            "competency": competency,
+            "remote_session_id": remote_learning_session_id,
+            "local_passed": local_passed,
+            "local_score": overall,
+            "payload": submit_payload,
+            "submit_response": submit_response,
+            "fetch_response": fetch_response,
+            "remote_passed": remote_passed,
+        },
+    )
+    return {
+        "remote_required": True,
+        "confirmed": remote_passed,
+        "remote_passed": remote_passed,
+        "remote_session": remote_session,
+        "submit_response": submit_response,
+        "fetch_response": fetch_response,
+        "warning": session.current_assessment_sync_error,
+    }
+
+
 def _enforce_question_count(text: str, max_questions: int = PRE_ASSESSMENT_QUESTION_COUNT) -> str:
     questions = [part.strip() for part in re.findall(r"[^?]*\?", text, flags=re.MULTILINE) if part.strip()]
     selected = questions[:max_questions]
@@ -360,6 +668,7 @@ def build_competency_intro(session: LearnerSession) -> str:
     session.competency_interaction = 1
     session.add_message("assistant", intro_message)
     _record_session_interaction(session, interaction_type="intro", interaction_number=1, concept=competency)
+    _record_aip(session, "AIP-01", trigger="intro_delivered", metadata={"competency": competency})
     _record_remote_teaching_interaction(
         session,
         competency,
@@ -699,39 +1008,14 @@ def _build_personalization_state(session: LearnerSession) -> dict[str, str]:
 
 async def _setup_competency(session: LearnerSession):
     competency = session.current_competency
-    competency_label = _competency_prompt_label(session, competency)
     details = _get_competency_details(session, competency)
     context_description = str(details.get("description") or "").strip()
 
     if competency not in session.study_materials:
-        material = StudyMeterial().crew().kickoff(
-            inputs={
-                "topic": session.topic,
-                "competency": competency_label,
-                "user_level": session.user_level,
-                "context_description": context_description,
-                "remote_micro_credential_level": session.remote_micro_credential_level or "not_specified",
-                "academic_stage": session.academic_stage,
-                "academic_guidance": session.academic_guidance,
-            }
-        )
-        session.study_materials[competency] = material.raw
+        session.study_materials[competency] = _build_static_study_material(session, competency, context_description)
 
     if competency not in session.learning_plans:
-        plan = PathPlnner().crew().kickoff(
-            inputs={
-                "topic": session.topic,
-                "competency": competency_label,
-                "user_level": session.user_level,
-                "weak_areas": ", ".join(session.weak_areas) or "none",
-                "context_description": context_description,
-                "interaction_budget": BASE_LEARNING_INTERACTIONS,
-                "remote_micro_credential_level": session.remote_micro_credential_level or "not_specified",
-                "academic_stage": session.academic_stage,
-                "academic_guidance": session.academic_guidance,
-            }
-        )
-        session.learning_plans[competency] = plan.raw
+        session.learning_plans[competency] = _build_static_learning_plan(session, competency, context_description)
 
     if competency not in session.competency_subparts:
         session.competency_subparts[competency] = _extract_subparts_from_plan(
@@ -743,29 +1027,101 @@ async def _setup_competency(session: LearnerSession):
 def _generate_preassessment_prompt(session: LearnerSession) -> str:
     competency = session.current_competency
     competency_label = _competency_prompt_label(session, competency)
-    result = PreAssessCrew().crew().kickoff(
+    result = _run_mapped_ai_call(
+        session,
+        "AIP-02",
+        purpose="diagnostic_prompt_generation",
+        crew_factory=PreAssessCrew,
         inputs={
             "topic": session.topic,
             "competencies": competency_label,
             "chat_history": session.format_recent_history(),
             "user_message": f"Generate {PRE_ASSESSMENT_QUESTION_COUNT} applied pre-assessment questions for this competency.",
             "turn_number": 1,
-        }
+        },
     )
     return _enforce_question_count(result.raw.strip())
 
 
 def _classify_competency_readiness(session: LearnerSession) -> dict[str, Any]:
-    result = LevelClassifierCrew().crew().kickoff(
-        inputs={
-            "topic": session.current_competency,
-            "chat_history": session.format_recent_history(12),
+    learner_answer = next((msg.content for msg in reversed(session.messages) if msg.role == "user"), "")
+    if not learner_answer or len(_normalize_whitespace(learner_answer)) < 12:
+        return {"level": "beginner", "weak_areas": _derive_default_weak_areas(session)}
+
+    level = _classify_answer_depth(learner_answer)
+    weak_areas = _derive_default_weak_areas(session)
+    lowered = learner_answer.lower()
+    if "stakeholder" in lowered:
+        weak_areas = [item for item in weak_areas if "stakeholder" not in item.lower()] or weak_areas
+    if "measure" in lowered or "metric" in lowered or "outcome" in lowered:
+        weak_areas = [item for item in weak_areas if "measurable outcomes" not in item.lower()] or weak_areas
+    if "because" in lowered or "therefore" in lowered or "tradeoff" in lowered:
+        weak_areas = [item for item in weak_areas if "justification" not in item.lower()] or weak_areas
+    return {"level": level, "weak_areas": weak_areas[:3]}
+
+
+def _diagnostic_answer_is_meaningful(session: LearnerSession, learner_answer: str) -> bool:
+    text = _normalize_whitespace(learner_answer)
+    if not text:
+        return False
+
+    lowered = text.lower()
+    if lowered in {
+        "string",
+        "test",
+        "testing",
+        "hello",
+        "hi",
+        "ok",
+        "okay",
+        "yes",
+        "no",
+        "n/a",
+        "na",
+        "none",
+    }:
+        return False
+
+    tokens = _tokenize_formative_text(text)
+    if len(tokens) < 4:
+        return False
+
+    answer_terms = set(tokens)
+    prompt_terms = _extract_significant_prompt_terms(
+        f"{session.current_competency} {session.pre_assessment_prompt or ''}"
+    )
+    shared_terms = prompt_terms & answer_terms
+    has_reasoning = any(marker in lowered for marker in _FORMATIVE_REASONING_MARKERS) or any(
+        marker in lowered for marker in ("i would", "i will", "first", "then", "so that")
+    )
+    has_structured_action = any(
+        term in answer_terms
+        for term in {
+            "stakeholder",
+            "stakeholders",
+            "scope",
+            "goal",
+            "goals",
+            "outcome",
+            "outcomes",
+            "measure",
+            "metrics",
+            "priority",
+            "priorities",
+            "team",
+            "process",
+            "criteria",
+            "risk",
+            "analysis",
+            "plan",
         }
     )
-    return _safe_json_loads(
-        result.raw,
-        {"level": "beginner", "weak_areas": [session.current_competency.lower()]},
-    )
+
+    if len(shared_terms) >= 2 and (has_reasoning or len(tokens) >= 8):
+        return True
+    if len(tokens) >= 10 and has_reasoning and has_structured_action:
+        return True
+    return False
 
 
 def _format_formative_feedback(passed: bool, percent: float, summary: str, *, streak_bonus: bool = False) -> str:
@@ -789,6 +1145,20 @@ def _all_formative_slots_passed(session: LearnerSession) -> bool:
 
 def _apply_formative_outcome(session: LearnerSession, passed: bool, percent: float, summary: str, *, easy_pass: bool) -> str:
     _update_formative_slot(session, passed)
+    current_slot = max(session.formative_slot_number or 1, 1)
+    feedback_aip = {
+        1: "AIP-06",
+        2: "AIP-08",
+        3: "AIP-10",
+    }.get(current_slot)
+    if feedback_aip:
+        _record_aip(
+            session,
+            feedback_aip,
+            trigger=f"fa{current_slot}_feedback",
+            outcome=_binary_outcome_label(passed),
+            metadata={"score": percent},
+        )
     points_delta = session.award_points_for_formative(passed)
     session.formative_feedback_log.append(
         {
@@ -803,6 +1173,8 @@ def _apply_formative_outcome(session: LearnerSession, passed: bool, percent: flo
     session.current_formative_prompt = None
 
     if passed:
+        session.developing_competency_active = False
+        session.developing_competency_reason = None
         session.consecutive_formative_passes += 1
         session.consecutive_formative_fails = 0
         session.consecutive_easy_passes = session.consecutive_easy_passes + 1 if easy_pass else 0
@@ -811,11 +1183,13 @@ def _apply_formative_outcome(session: LearnerSession, passed: bool, percent: flo
         if session.current_subpart_index < len(session.competency_subparts.get(session.current_competency, [])) - 1:
             session.current_subpart_index += 1
     else:
+        session.developing_competency_active = True
+        session.developing_competency_reason = "Formative gate not yet cleared."
         session.consecutive_formative_passes = 0
         session.consecutive_easy_passes = 0
         session.consecutive_formative_fails += 1
         session.current_difficulty = _lower_difficulty(session.current_difficulty)
-        if sum(item is False for item in session.formative_slots) >= 2:
+        if session.consecutive_formative_fails >= 2 or sum(item is False for item in session.formative_slots) >= 2:
             session.revision_required = True
 
     if session.learning_turn >= BASE_LEARNING_INTERACTIONS and _all_formative_slots_passed(session):
@@ -866,13 +1240,22 @@ def _build_formative_rubric(session: LearnerSession) -> dict[str, Any]:
 def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -> tuple[bool, float, str, bool]:
     rubric = _build_formative_rubric(session)
     prompt = session.current_formative_prompt or session.current_subpart or session.current_competency
-    result = AssessmentCrew().crew().kickoff(
+    feedback_aip = {
+        1: "AIP-06",
+        2: "AIP-08",
+        3: "AIP-10",
+    }.get(max(session.formative_slot_number or 1, 1), "AIP-06")
+    result = _run_mapped_ai_call(
+        session,
+        feedback_aip,
+        purpose="formative_evaluation",
+        crew_factory=AssessmentCrew,
         inputs={
             "competency": f"Formative check for {session.current_competency}",
             "scenario": prompt,
             "user_response": learner_answer,
             "rubric_json": json.dumps(rubric),
-        }
+        },
     )
     payload = _safe_json_loads(result.raw, {"criteria_scores": [], "overall_percent": 0.0, "pass": False, "summary": result.raw})
     if not payload.get("criteria_scores") and isinstance(payload.get("summary"), str):
@@ -917,6 +1300,19 @@ def _should_ask_formative_check(session: LearnerSession) -> bool:
     if session.learning_turn % 2 == 0:
         return True
     return session.revision_required and session.learning_turn > BASE_LEARNING_INTERACTIONS
+
+
+def _target_formative_slot(session: LearnerSession) -> int:
+    if 0 <= session.current_formative_slot < len(session.formative_slots):
+        current_value = session.formative_slots[session.current_formative_slot]
+        if current_value is False:
+            return session.current_formative_slot
+
+    for idx, value in enumerate(session.formative_slots):
+        if value is not True:
+            return idx
+
+    return len(session.formative_slots)
 
 
 def _interaction_goal(session: LearnerSession) -> str:
@@ -1074,9 +1470,21 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
     include_formative = _should_ask_formative_check(session)
     length_policy = _teaching_length_policy(session)
     previous_formats = ", ".join(session.delivery_format_history[-3:]) or "none yet"
+    live_aip_code = {
+        1: "AIP-03",
+        2: "AIP-04",
+        3: "AIP-05",
+        4: "AIP-07",
+        5: "AIP-09",
+        6: "AIP-11",
+    }.get(session.learning_turn, "AIP-04")
 
     def _kickoff(delivery_mode: str, anti_repeat_instruction: str = "") -> str:
-        result = TutorCrew().crew().kickoff(
+        result = _run_mapped_ai_call(
+            session,
+            live_aip_code,
+            purpose="teaching_generation",
+            crew_factory=TutorCrew,
             inputs={
                 "topic": session.topic,
                 "competency": competency_label,
@@ -1111,7 +1519,7 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
                 "response_word_ceiling": length_policy["ceiling"],
                 "previous_delivery_modes": previous_formats,
                 "anti_repeat_instruction": anti_repeat_instruction or "Do not repeat the previous explanation verbatim.",
-            }
+            },
         )
         return result.raw.strip()
 
@@ -1134,15 +1542,23 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
 
     if include_formative:
         session.awaiting_formative_response = True
-        needs_new_slot = (
-            session.current_formative_slot < 0
-            or session.current_formative_slot >= len(session.formative_slots)
-            or session.formative_slots[session.current_formative_slot] is not None
-        )
-        if needs_new_slot:
-            session.current_formative_slot = len(session.formative_slots)
+        target_slot = _target_formative_slot(session)
+        while len(session.formative_slots) <= target_slot:
             session.formative_slots.append(None)
+        session.current_formative_slot = target_slot
         session.current_formative_prompt = _parse_formative_prompt(ai_response)
+        formative_aip = {
+            1: "AIP-05",
+            2: "AIP-07",
+            3: "AIP-09",
+        }.get(session.formative_slot_number or 1)
+        if formative_aip:
+            _record_aip(
+                session,
+                formative_aip,
+                trigger=f"fa{session.formative_slot_number}_prompt_generated",
+                metadata={"delivery_mode": personalization["delivery_mode"]},
+            )
         if interaction_type != "revision":
             interaction_type = "formative"
 
@@ -1196,6 +1612,7 @@ async def handle_pre_assessment_start(session: LearnerSession) -> dict[str, Any]
     session.competency_interaction = max(session.competency_interaction, 2)
     session.add_message("assistant", prompt)
     _record_session_interaction(session, interaction_type="diagnostic", interaction_number=2, concept=session.current_competency)
+    _record_aip(session, "AIP-02", trigger="diagnostic_prompt_generated", metadata={"question_count": PRE_ASSESSMENT_QUESTION_COUNT})
     _record_remote_teaching_interaction(
         session,
         session.current_competency,
@@ -1219,6 +1636,19 @@ async def handle_pre_assessment_start(session: LearnerSession) -> dict[str, Any]
 
 
 async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> dict[str, Any]:
+    if not _diagnostic_answer_is_meaningful(session, user_answer):
+        return {
+            "session_id": session.session_id,
+            "phase": session.phase,
+            "message": (
+                "Please answer the diagnostic with a short, specific response that explains what you would do and why. "
+                "The previous input was too limited to place you at the right starting point."
+            ),
+            "diagnostic_validation_failed": True,
+            "counted_as_interaction": False,
+            **_runtime_fields(session),
+        }
+
     session.add_message("user", user_answer)
     anomalies = detect_and_record_anomalies(session, user_answer, "/pre-assessment/chat")
     classifier_payload = _classify_competency_readiness(session)
@@ -1245,6 +1675,7 @@ async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> di
         user_message=f"Learner pre-assessment answer: {user_answer}",
         formative_feedback="Use the pre-assessment answer to personalize the first teaching interaction.",
     )
+    _record_aip(session, "AIP-03", trigger="first_teaching_turn_generated", metadata={"user_level": session.user_level})
     _record_remote_teaching_interaction(
         session,
         session.current_competency,
@@ -1330,6 +1761,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
         session.competency_interaction += 1
         session.current_assessment_prompt = _generate_assessment_prompt(session)
         session.add_message("assistant", session.current_assessment_prompt)
+        _record_aip(session, "AIP-11", trigger="competency_assessment_prompt_generated")
         _record_session_interaction(
             session,
             interaction_type="final_assessment",
@@ -1390,6 +1822,13 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
         session.revision_turns_used = session.learning_turn - session.max_learning_turns
 
     ai_response, interaction_type = _generate_learning_response(session, user_message, formative_feedback)
+    if session.learning_turn == 2:
+        _record_aip(
+            session,
+            "AIP-04",
+            trigger="worked_example_delivered",
+            metadata={"delivery_mode": session.personalization_state.get("delivery_mode")},
+        )
     _record_remote_teaching_interaction(
         session,
         competency,
@@ -1437,19 +1876,28 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     session.add_message("user", user_answer)
     anomalies = detect_and_record_anomalies(session, user_answer, "/assessment/competency", is_assessment=True)
 
-    result = AssessmentCrew().crew().kickoff(
+    result = _run_mapped_ai_call(
+        session,
+        "AIP-12",
+        purpose="competency_assessment_scoring",
+        crew_factory=AssessmentCrew,
         inputs={
             "competency": competency_label,
             "scenario": prompt or scenario,
             "user_response": user_answer,
             "rubric_json": json.dumps(rubric),
-        }
+        },
     )
     evaluation = _safe_json_loads(result.raw, {"criteria_scores": [], "overall_percent": 0.0, "pass": False, "summary": result.raw})
     normalized = _normalize_binary_evaluation(evaluation, rubric)
     overall = float(normalized.get("overall_percent", 0.0) or 0.0)
     passed = bool(normalized.get("pass", overall >= PASS_THRESHOLD))
     summary = str(normalized.get("summary") or "").strip() or "No assessment summary returned."
+    provisional_binary_outcome = _binary_outcome_label(passed)
+    session.local_assessment_passed = passed
+    session.remote_assessment_synced = False
+    session.remote_assessment_passed = None
+    session.current_assessment_sync_error = None
     rubric_key = rubric.get("rubric_key") or normalize_rubric_key(competency)
     rubric_version = int(rubric.get("version") or get_rubric_version(competency) or 1)
     rubric_hash = rubric.get("source_hash") or get_rubric_source_hash(competency)
@@ -1473,23 +1921,76 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     )
 
     remote_learning_session_id = _ensure_remote_learning_session(session, competency)
-    if remote_learning_session_id:
-        try:
-            remote_backend_client.submit_assessment(
-                session_id=remote_learning_session_id,
-                scenario_question=prompt,
-                learner_response=user_answer,
-                rubric_score=overall,
-                ai_feedback=summary,
-                token=session.remote_auth_token,
-            )
-        except RemoteBackendError as exc:
-            warning = f"Remote assessment sync failed for '{competency}': {exc}"
-            _set_remote_sync_failure(session, warning, remote_learning_session_id)
-        else:
-            _set_remote_sync_success(session, remote_learning_session_id)
+    remote_confirmation = _sync_remote_competency_assessment(
+        session,
+        competency=competency,
+        remote_required=session.source == "remote",
+        remote_learning_session_id=remote_learning_session_id,
+        prompt=prompt,
+        user_answer=user_answer,
+        overall=overall,
+        summary=summary,
+        local_passed=passed,
+    )
 
-    if passed:
+    if remote_confirmation["remote_required"] and remote_confirmation["confirmed"] is None:
+        session.latest_binary_outcome = None
+        pending_message = (
+            f"{summary}\n\n"
+            "The assessment was scored locally, but backend confirmation did not complete. "
+            "The competency remains locked until the remote assessment state is confirmed."
+        )
+        session.add_message("assistant", pending_message)
+        save_session(session)
+        _log_session_event(
+            session,
+            "/assessment/competency",
+            "assessment_confirmation_pending",
+            {
+                "competency": competency,
+                "local_passed": passed,
+                "score": overall,
+                "warning": session.current_assessment_sync_error,
+            },
+        )
+        return {
+            "session_id": session.session_id,
+            "phase": session.phase,
+            "assessed_competency": competency,
+            "score": overall,
+            "passed": False,
+            "message": pending_message,
+            "assessment_feedback": summary,
+            "assessment_detail": normalized,
+            "binary_outcome": None,
+            "rubric_source": rubric_source,
+            "rubric_version": rubric_version,
+            "rubric_source_hash": rubric_hash,
+            "awaiting_backend_confirmation": True,
+            "backend_warnings": session.backend_warnings,
+            "anomaly_flags": anomalies,
+            "gamification": build_gamification_payload(session),
+            **_runtime_fields(session),
+        }
+
+    authoritative_passed = passed if not remote_confirmation["remote_required"] else bool(remote_confirmation["confirmed"])
+    binary_outcome = _binary_outcome_label(authoritative_passed)
+    session.latest_binary_outcome = binary_outcome
+    _record_aip(
+        session,
+        "AIP-12",
+        trigger="competency_assessment_scored",
+        outcome=binary_outcome,
+        metadata={
+            "score": overall,
+            "local_passed": passed,
+            "remote_passed": remote_confirmation["confirmed"],
+        },
+    )
+
+    if authoritative_passed:
+        session.developing_competency_active = False
+        session.developing_competency_reason = None
         record_competency_attempt(
             session.session_id,
             competency,
@@ -1526,6 +2027,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         )
         session.earned_badges.append(badge)
         session.add_message("assistant", summary)
+        _record_aip(session, "AIP-13", trigger="competency_summary_delivered", outcome=binary_outcome, metadata={"score": overall})
         _log_session_event(session, "/assessment/competency", "badge_issued", badge)
         if session.is_last_competency:
             session.phase = "final_assessment"
@@ -1548,6 +2050,19 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
                 allow_session_creation=False,
             )
             save_session(session)
+            _log_session_event(
+                session,
+                "/assessment/competency",
+                "assessment_state_committed",
+                {
+                    "competency": competency,
+                    "authoritative_passed": True,
+                    "local_passed": passed,
+                    "remote_passed": remote_confirmation["confirmed"],
+                    "phase": session.phase,
+                    "next_action": session.required_next_action,
+                },
+            )
             return {
                 "session_id": session.session_id,
                 "phase": "final_assessment",
@@ -1559,6 +2074,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
                     "All competency assessments are complete. Continue with the final micro-credential assessment."
                 ),
                 "assessment_detail": normalized,
+                "binary_outcome": binary_outcome,
                 "rubric_source": rubric_source,
                 "rubric_version": rubric_version,
                 "rubric_source_hash": rubric_hash,
@@ -1575,6 +2091,19 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         next_intro = build_competency_intro(session)
         record_competency_attempt(session.session_id, session.current_competency, session.competency_attempt_number, "in_progress")
         save_session(session)
+        _log_session_event(
+            session,
+            "/assessment/competency",
+            "assessment_state_committed",
+            {
+                "assessed_competency": competency,
+                "authoritative_passed": True,
+                "local_passed": passed,
+                "remote_passed": remote_confirmation["confirmed"],
+                "phase": session.phase,
+                "next_competency": session.current_competency,
+            },
+        )
         return {
             "session_id": session.session_id,
             "phase": session.phase,
@@ -1586,6 +2115,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
                 f"Next competency: **{session.current_competency}**.\n\n{next_intro}"
             ),
             "assessment_detail": normalized,
+            "binary_outcome": binary_outcome,
             "rubric_source": rubric_source,
             "rubric_version": rubric_version,
             "rubric_source_hash": rubric_hash,
@@ -1619,11 +2149,22 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     _reset_learning_after_assessment_fail(session)
     session.learning_turn = 1
     session.competency_interaction = 3
-    relearn_feedback = (
-        f"Assessment score was {overall:.1f}%. Restart from interaction 3. "
-        "Use the assessment feedback to reteach the weakest concepts in a different format."
+    session.developing_competency_active = True
+    session.developing_competency_reason = "Competency assessment not yet competent."
+    learning_message = _build_static_remediation_message(
+        session,
+        title=f"{binary_outcome} - Competency Assessment",
+        summary=summary,
+        weakest_focus=", ".join(session.weak_areas[:2]) or competency.lower(),
     )
-    learning_message, interaction_type = _generate_learning_response(session, user_answer, relearn_feedback)
+    interaction_type = "revision"
+    session.add_message("assistant", learning_message)
+    _record_session_interaction(
+        session,
+        interaction_type="revision",
+        interaction_number=session.competency_interaction,
+        concept=session.current_competency,
+    )
     _record_remote_teaching_interaction(
         session,
         competency,
@@ -1634,6 +2175,19 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         interaction_type="spaced_review" if interaction_type == "revision" else ("formative_check" if interaction_type == "formative" else "teaching"),
     )
     save_session(session)
+    _log_session_event(
+        session,
+        "/assessment/competency",
+        "assessment_state_committed",
+        {
+            "competency": competency,
+            "authoritative_passed": False,
+            "local_passed": passed,
+            "remote_passed": remote_confirmation["confirmed"],
+            "phase": session.phase,
+            "interaction_number": session.competency_interaction,
+        },
+    )
     return {
         "session_id": session.session_id,
         "phase": session.phase,
@@ -1643,6 +2197,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         "message": learning_message,
         "assessment_feedback": summary,
         "assessment_detail": normalized,
+        "binary_outcome": binary_outcome,
         "rubric_source": rubric_source,
         "rubric_version": rubric_version,
         "rubric_source_hash": rubric_hash,
@@ -1661,19 +2216,25 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
     session.add_message("user", user_answer)
     anomalies = detect_and_record_anomalies(session, user_answer, "/assessment/final", is_assessment=True)
 
-    result = AssessmentCrew().crew().kickoff(
+    result = _run_mapped_ai_call(
+        session,
+        "AIP-14" if session.is_last_competency else "AIP-12",
+        purpose="final_assessment_scoring",
+        crew_factory=AssessmentCrew,
         inputs={
             "competency": f"Final micro-credential assessment for {session.topic}",
             "scenario": prompt,
             "user_response": user_answer,
             "rubric_json": json.dumps(rubric),
-        }
+        },
     )
     evaluation = _safe_json_loads(result.raw, {"criteria_scores": [], "overall_percent": 0.0, "pass": False, "summary": result.raw})
     normalized = _normalize_binary_evaluation(evaluation, rubric)
     overall = float(normalized.get("overall_percent", 0.0) or 0.0)
     passed = bool(normalized.get("pass", overall >= PASS_THRESHOLD))
     summary = str(normalized.get("summary") or "").strip() or "No final assessment summary returned."
+    binary_outcome = _binary_outcome_label(passed)
+    session.latest_binary_outcome = binary_outcome
     record_final_assessment(session.session_id, session.final_assessment_attempts, prompt, user_answer, normalized, overall, passed)
     _record_remote_teaching_interaction(
         session,
@@ -1685,10 +2246,20 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
         interaction_type="final_assessment",
         allow_session_creation=False,
     )
+    _record_aip(
+        session,
+        "AIP-14" if passed else "AIP-12",
+        trigger="mc_completion_reflection_delivered" if passed else "final_assessment_scored",
+        scope="mc" if passed else "cc",
+        outcome=binary_outcome,
+        metadata={"score": overall},
+    )
 
     if passed:
         session.phase = "completed"
         session.completed_at = utc_now_iso()
+        session.developing_competency_active = False
+        session.developing_competency_reason = None
         session.add_message("assistant", summary)
         completion_badge = create_badge(
             session.session_id,
@@ -1712,6 +2283,7 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
                 "The full micro-credential is complete. Certificate generation is now available."
             ),
             "assessment_detail": normalized,
+            "binary_outcome": binary_outcome,
             "final_assessment_prompt": prompt,
             "gamification": build_gamification_payload(session),
             "session_summary": session_summary,
@@ -1724,10 +2296,21 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
     session.learning_turn = 1
     session.competency_interaction = 3
     session.add_message("assistant", summary)
-    learning_message, interaction_type = _generate_learning_response(
+    session.developing_competency_active = True
+    session.developing_competency_reason = "Final assessment not yet competent."
+    learning_message = _build_static_remediation_message(
         session,
-        user_answer,
-        f"Final assessment score was {overall:.1f}%. Restart from interaction 3 and reteach the weakest concept with a different explanation style.",
+        title=f"{binary_outcome} - Final Assessment",
+        summary=summary,
+        weakest_focus=", ".join(session.weak_areas[:3]) or session.current_competency.lower(),
+    )
+    interaction_type = "revision"
+    session.add_message("assistant", learning_message)
+    _record_session_interaction(
+        session,
+        interaction_type="revision",
+        interaction_number=session.competency_interaction,
+        concept=session.current_competency,
     )
     _record_remote_teaching_interaction(
         session,
@@ -1747,6 +2330,7 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
         "message": learning_message,
         "assessment_feedback": summary,
         "assessment_detail": normalized,
+        "binary_outcome": binary_outcome,
         "interaction_number": session.competency_interaction,
         "mastery_reset": True,
         "gamification": build_gamification_payload(session),

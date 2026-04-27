@@ -117,6 +117,16 @@ def configure_logging() -> None:
     global _LOGGING_CONFIGURED
     if _LOGGING_CONFIGURED:
         return
+    
+    import sys
+    if sys.stdout and getattr(sys.stdout, 'encoding', '').lower() != 'utf-8':
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+            if sys.stderr:
+                sys.stderr.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+
     settings = get_settings()
     level = getattr(logging, settings.log_level, logging.INFO)
     logging.basicConfig(level=level)

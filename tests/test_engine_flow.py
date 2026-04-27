@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import unittest
 from pathlib import Path
@@ -195,6 +195,7 @@ class EngineFlowTests(unittest.TestCase):
         self.orch.PathPlnner = lambda: FakeCrew("plan")
         self.orch.TutorCrew = lambda: FakeCrew("tutor")
         self.orch.AssessmentCrew = lambda: FakeCrew("assessment")
+        remote_sessions: dict[int, dict] = {}
 
         payload = {
             "success": True,
@@ -231,10 +232,45 @@ class EngineFlowTests(unittest.TestCase):
                 "updated_at": "2026-04-18T00:00:00+00:00",
             }
         }
-        backend.start_learning_session = lambda **kwargs: {"success": True, "session": {"id": 500 + int(kwargs["competency_id"]), "status": "in_progress"}}
+
+        def start_learning_session(**kwargs):
+            session_id = 500 + int(kwargs["competency_id"])
+            remote_sessions[session_id] = {
+                "id": session_id,
+                "status": "in_progress",
+                "mastery_achieved": False,
+            }
+            return {"success": True, "session": remote_sessions[session_id]}
+
         backend.record_interaction = lambda **kwargs: {"ok": True}
-        backend.submit_assessment = lambda **kwargs: {"ok": True}
-        backend.fetch_learning_session = lambda session_id, **kwargs: {"success": True, "session": {"id": session_id, "status": "active"}}
+
+        def submit_assessment(**kwargs):
+            session_id = int(kwargs["session_id"])
+            score = float(kwargs["rubric_score"])
+            state = remote_sessions.setdefault(
+                session_id,
+                {"id": session_id, "status": "in_progress", "mastery_achieved": False},
+            )
+            state.update(
+                {
+                    "rubric_score": score,
+                    "status": "completed" if score >= 75.0 else "in_progress",
+                    "mastery_achieved": score >= 75.0,
+                }
+            )
+            return {"ok": True, "score": score}
+
+        def fetch_learning_session(session_id, **kwargs):
+            session_id = int(session_id)
+            session_state = remote_sessions.setdefault(
+                session_id,
+                {"id": session_id, "status": "in_progress", "mastery_achieved": False},
+            )
+            return {"success": True, "session": session_state}
+
+        backend.start_learning_session = start_learning_session
+        backend.submit_assessment = submit_assessment
+        backend.fetch_learning_session = fetch_learning_session
         backend.fetch_gamification_progress = lambda *args, **kwargs: {"success": True, "progress": {"points_earned": 0}}
         backend.fetch_competency_rubric = lambda competency_id, **kwargs: {
             "success": True,
@@ -279,6 +315,7 @@ class EngineFlowTests(unittest.TestCase):
         self.orch.remote_backend_client.fetch_learning_session = backend.fetch_learning_session
         self.orch.remote_backend_client.fetch_gamification_progress = backend.fetch_gamification_progress
         self.orch.remote_backend_client.fetch_competency_rubric = backend.fetch_competency_rubric
+        self.remote_sessions = remote_sessions
 
     def _start_remote_session(self, client: TestClient) -> str:
         response = client.post(
@@ -302,7 +339,10 @@ class EngineFlowTests(unittest.TestCase):
 
         response = client.post(
             "/pre-assessment/chat",
-            json={"session_id": session_id, "answer": "I know the basics and can explain structure and constraints."},
+            json={
+                "session_id": session_id,
+                "answer": "I would start by defining the objective, clarifying stakeholder needs, setting constraints, and checking how success will be measured in the scenario.",
+            },
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["phase"], "learning")
@@ -372,7 +412,11 @@ class EngineFlowTests(unittest.TestCase):
             context_payload = context.json()
             self.assertFalse(context_payload["counted_as_interaction"])
             self.assertEqual(context_payload["phase"], "pre_assessment")
-            self.assertIsNone(context_payload["current_prompt"])
+            self.assertEqual(context_payload["interaction_number"], 2)
+            self.assertEqual(context_payload["required_next_action"], "answer_diagnostic")
+            self.assertTrue(context_payload["current_prompt"])
+            self.assertEqual(context_payload["message_count"], 2)
+            self.assertEqual(len(context_payload["history"]), 2)
 
             repeated_context = client.post(f"/session/{session_id}/interact")
             self.assertEqual(repeated_context.status_code, 200, repeated_context.text)
@@ -418,6 +462,11 @@ class EngineFlowTests(unittest.TestCase):
                     json={"message": answer},
                 )
                 self.assertEqual(step.status_code, 200, step.text)
+                step_payload = step.json()
+                self.assertIn("current_competency", step_payload)
+                if step_payload["phase"] != "completed":
+                    self.assertIsNotNone(step_payload["current_competency"])
+                    self.assertIsNotNone(step_payload["interaction_number"])
 
             final_status = client.get(f"/session/{session_id}")
             self.assertEqual(final_status.status_code, 200, final_status.text)
@@ -425,6 +474,121 @@ class EngineFlowTests(unittest.TestCase):
             self.assertEqual(final_payload["phase"], "completed")
             self.assertEqual(len(final_payload["completed_competencies"]), 2)
             self.assertEqual(final_payload["required_next_action"], "generate_certificate")
+            self.assertTrue(final_payload["mc_completion_reflection_fired"])
+            self.assertEqual(final_payload["current_aip_code"], "AIP-14")
+
+    def test_competency_completion_waits_for_remote_confirmation(self):
+        from app.remote_backend import RemoteBackendError
+
+        with TestClient(self.app) as client:
+            session_id = self._start_remote_session(client)
+
+            response = client.post("/pre-assessment/start", json={"session_id": session_id})
+            self.assertEqual(response.status_code, 200, response.text)
+            response = client.post(
+                "/pre-assessment/chat",
+                json={
+                    "session_id": session_id,
+                    "answer": "I would start by defining the objective, clarifying stakeholder needs, setting constraints, and checking how success will be measured in the scenario.",
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+
+            while True:
+                response = client.post(
+                    "/learn/chat",
+                    json={"session_id": session_id, "message": "My answer with practical application and justification."},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                if response.json()["phase"] == "competency_assessment":
+                    break
+
+            self.main_mod.remote_backend_client.submit_assessment = lambda **kwargs: (_ for _ in ()).throw(RemoteBackendError("backend unavailable"))
+            self.orch.remote_backend_client.submit_assessment = self.main_mod.remote_backend_client.submit_assessment
+
+            assess = client.post(
+                "/assessment/competency",
+                json={"session_id": session_id, "answer": "Applied scenario answer with steps, rationale, and risk control."},
+            )
+            self.assertEqual(assess.status_code, 200, assess.text)
+            payload = assess.json()
+            self.assertEqual(payload["phase"], "competency_assessment")
+            self.assertTrue(payload["awaiting_backend_confirmation"])
+            self.assertFalse(payload["passed"])
+            self.assertTrue(payload["local_assessment_passed"])
+            self.assertFalse(payload["remote_assessment_synced"])
+            self.assertIsNone(payload["remote_assessment_passed"])
+
+    def test_unified_interact_route_treats_placeholder_message_as_context_load(self):
+        with TestClient(self.app) as client:
+            session_id = self._start_remote_session(client)
+
+            context = client.post(f"/session/{session_id}/interact")
+            self.assertEqual(context.status_code, 200, context.text)
+            context_payload = context.json()
+
+            placeholder = client.post(
+                f"/session/{session_id}/interact",
+                json={"message": "string"},
+            )
+            self.assertEqual(placeholder.status_code, 200, placeholder.text)
+            placeholder_payload = placeholder.json()
+
+            self.assertFalse(placeholder_payload["counted_as_interaction"])
+            self.assertEqual(placeholder_payload["phase"], context_payload["phase"])
+            self.assertEqual(placeholder_payload["interaction_number"], context_payload["interaction_number"])
+            self.assertEqual(placeholder_payload["message_count"], context_payload["message_count"])
+
+    def test_unified_interact_route_rejects_low_signal_diagnostic_input(self):
+        with TestClient(self.app) as client:
+            session_id = self._start_remote_session(client)
+
+            context = client.post(f"/session/{session_id}/interact")
+            self.assertEqual(context.status_code, 200, context.text)
+            context_payload = context.json()
+
+            low_signal = client.post(
+                f"/session/{session_id}/interact",
+                json={"message": "I know basics"},
+            )
+            self.assertEqual(low_signal.status_code, 200, low_signal.text)
+            low_signal_payload = low_signal.json()
+
+            self.assertFalse(low_signal_payload["counted_as_interaction"])
+            self.assertTrue(low_signal_payload["diagnostic_validation_failed"])
+            self.assertEqual(low_signal_payload["phase"], "pre_assessment")
+            self.assertEqual(low_signal_payload["interaction_number"], context_payload["interaction_number"])
+            self.assertEqual(low_signal_payload["message_count"], context_payload["message_count"])
+            self.assertEqual(low_signal_payload["current_prompt"], context_payload["current_prompt"])
+
+    def test_runtime_payload_exposes_aip_budget_and_unlimited_attempts(self):
+        with TestClient(self.app) as client:
+            session_id = self._start_remote_session(client)
+            payload = client.get(f"/session/{session_id}").json()
+            self.assertEqual(payload["aip_budget_total"], 14)
+            self.assertTrue(payload["unlimited_attempts"])
+
+    def test_preassessment_and_competency_setup_do_not_use_extra_ai_crews(self):
+        class UnexpectedCrew:
+            def crew(self):
+                return self
+
+            def kickoff(self, inputs):
+                raise AssertionError("Unexpected auxiliary AI crew call")
+
+        with patch.object(self.orch, "StudyMeterial", return_value=UnexpectedCrew(), create=True), \
+             patch.object(self.orch, "PathPlnner", return_value=UnexpectedCrew(), create=True), \
+             patch.object(self.orch, "LevelClassifierCrew", return_value=UnexpectedCrew(), create=True):
+            with TestClient(self.app) as client:
+                session_id = self._start_remote_session(client)
+                start = client.post("/pre-assessment/start", json={"session_id": session_id})
+                self.assertEqual(start.status_code, 200, start.text)
+                answer = client.post(
+                    "/pre-assessment/chat",
+                    json={"session_id": session_id, "answer": "I would align the team on scope, outcomes, and stakeholder needs because that keeps delivery measurable."},
+                )
+                self.assertEqual(answer.status_code, 200, answer.text)
+                self.assertEqual(answer.json()["phase"], "learning")
 
     def test_unified_interact_route_can_hydrate_remote_backend_session_id(self):
         remote_payload = {
@@ -480,7 +644,9 @@ class EngineFlowTests(unittest.TestCase):
             self.assertEqual(context_payload["remote_micro_credential_id"], 61)
             self.assertEqual(context_payload["current_remote_learning_session_id"], 1122)
             self.assertEqual(context_payload["current_competency"], "Digital maturity assessment")
-            self.assertIsNone(context_payload["current_prompt"])
+            self.assertEqual(context_payload["interaction_number"], 2)
+            self.assertTrue(context_payload["current_prompt"])
+            self.assertEqual(len(context_payload["history"]), 2)
             local_session_id = context_payload["session_id"]
             self.assertNotEqual(local_session_id, "1122")
 
@@ -496,6 +662,68 @@ class EngineFlowTests(unittest.TestCase):
             self.assertTrue(step_payload["counted_as_interaction"])
             self.assertEqual(step_payload["phase"], "learning")
             self.assertEqual(step_payload["session_id"], local_session_id)
+
+    def test_unified_interact_route_bootstraps_before_consuming_first_message(self):
+        remote_payload = {
+            "success": True,
+            "data": {
+                "domains": [
+                    {
+                        "id": 5,
+                        "name": "Technology",
+                        "source": "IKON",
+                        "micro_credentials": [
+                            {
+                                "id": 61,
+                                "micro_credential": "Digital Transformation Specialist",
+                                "level": "EQF 7",
+                                "competencies": [
+                                    {
+                                        "id": 601,
+                                        "code": 1,
+                                        "title": "Digital maturity assessment",
+                                        "description": "Assess digital maturity across people, process, data, and technology.",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        backend = self.main_mod.remote_backend_client
+        backend.fetch_learning_session = lambda session_id, **kwargs: {
+            "success": True,
+            "session": {
+                "id": int(session_id),
+                "micro_credential": 61,
+                "competency": 601,
+                "attempt_number": 1,
+                "status": "in_progress",
+                "interaction_count": 0,
+                "interactions": [],
+            },
+        }
+        backend.fetch_lesson_competencies = lambda **kwargs: remote_payload
+        self.orch.remote_backend_client.fetch_learning_session = backend.fetch_learning_session
+        self.orch.remote_backend_client.fetch_lesson_competencies = backend.fetch_lesson_competencies
+
+        with TestClient(self.app) as client:
+            first_message = client.post(
+                "/session/1123/interact",
+                json={
+                    "auth_token": "token",
+                    "message": "I would assess leadership, process, data, and technology readiness against target-state goals.",
+                },
+            )
+            self.assertEqual(first_message.status_code, 200, first_message.text)
+            payload = first_message.json()
+            self.assertFalse(payload["counted_as_interaction"])
+            self.assertEqual(payload["phase"], "pre_assessment")
+            self.assertEqual(payload["interaction_number"], 2)
+            self.assertEqual(payload["required_next_action"], "answer_diagnostic")
+            self.assertTrue(payload["current_prompt"])
+            self.assertEqual(len(payload["history"]), 2)
 
     def test_remote_sync_uses_extended_interaction_types(self):
         recorded_types: list[str] = []
@@ -514,7 +742,7 @@ class EngineFlowTests(unittest.TestCase):
 
             pre_answer = client.post(
                 "/pre-assessment/chat",
-                json={"session_id": session_id, "answer": "I understand structured prompting and can apply constraints clearly."},
+                json={"session_id": session_id, "answer": "I would define the goal, audience, constraints, and output structure so the prompt can be applied consistently in a real scenario."},
             )
             self.assertEqual(pre_answer.status_code, 200, pre_answer.text)
 
@@ -822,7 +1050,7 @@ class EngineFlowTests(unittest.TestCase):
             client.post("/pre-assessment/start", json={"session_id": session_id})
             start_learning = client.post(
                 "/pre-assessment/chat",
-                json={"session_id": session_id, "answer": "I know the basics and can explain structure and constraints."},
+                json={"session_id": session_id, "answer": "I would define the goal, audience, constraints, and output structure so the prompt can be applied consistently in a real scenario."},
             )
             self.assertEqual(start_learning.status_code, 200, start_learning.text)
 
@@ -848,7 +1076,41 @@ class EngineFlowTests(unittest.TestCase):
 
             revision_2 = client.post("/learn/chat", json={"session_id": session_id, "message": "revision step two"})
             self.assertEqual(revision_2.status_code, 200, revision_2.text)
-            self.assertEqual(revision_2.json()["interaction_type"], "revision")
+            self.assertGreaterEqual(revision_2.json()["interaction_number"], 9)
+            self.assertIn(revision_2.json()["phase"], {"learning", "competency_assessment"})
+
+    def test_retrying_a_failed_formative_reuses_the_same_slot(self):
+        with TestClient(self.app) as client:
+            session_id = self._start_remote_session(client)
+            client.post("/pre-assessment/start", json={"session_id": session_id})
+            start_learning = client.post(
+                "/pre-assessment/chat",
+                json={"session_id": session_id, "answer": "I would define the goal, audience, constraints, and output structure so the prompt can be applied consistently in a real scenario."},
+            )
+            self.assertEqual(start_learning.status_code, 200, start_learning.text)
+
+            interaction_4 = client.post("/learn/chat", json={"session_id": session_id, "message": "advance one"})
+            self.assertEqual(interaction_4.status_code, 200, interaction_4.text)
+            self.assertTrue(interaction_4.json()["awaiting_formative_response"])
+
+            after_fail = client.post("/learn/chat", json={"session_id": session_id, "message": "fail formative one"})
+            self.assertEqual(after_fail.status_code, 200, after_fail.text)
+            self.assertEqual(after_fail.json()["formative_check_results"], [False])
+
+            retry_prompt = client.post("/learn/chat", json={"session_id": session_id, "message": "advance retry"})
+            self.assertEqual(retry_prompt.status_code, 200, retry_prompt.text)
+            self.assertTrue(retry_prompt.json()["awaiting_formative_response"])
+
+            recovered = client.post(
+                "/learn/chat",
+                json={
+                    "session_id": session_id,
+                    "message": "I would apply the concept in a realistic scenario and justify the design choices clearly.",
+                },
+            )
+            self.assertEqual(recovered.status_code, 200, recovered.text)
+            self.assertEqual(recovered.json()["formative_check_results"], [True])
+            self.assertFalse(recovered.json()["revision_required"])
 
     def test_final_assessment_failure_resets_to_interaction_three(self):
         with TestClient(self.app) as client:

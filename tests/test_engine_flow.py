@@ -372,7 +372,14 @@ class EngineFlowTests(unittest.TestCase):
             context_payload = context.json()
             self.assertFalse(context_payload["counted_as_interaction"])
             self.assertEqual(context_payload["phase"], "pre_assessment")
-            self.assertTrue(context_payload["current_prompt"])
+            self.assertIsNone(context_payload["current_prompt"])
+
+            repeated_context = client.post(f"/session/{session_id}/interact")
+            self.assertEqual(repeated_context.status_code, 200, repeated_context.text)
+            repeated_payload = repeated_context.json()
+            self.assertFalse(repeated_payload["counted_as_interaction"])
+            self.assertEqual(repeated_payload["interaction_number"], context_payload["interaction_number"])
+            self.assertEqual(repeated_payload["message_count"], context_payload["message_count"])
 
             diagnostic = client.post(
                 f"/session/{session_id}/interact",
@@ -473,7 +480,7 @@ class EngineFlowTests(unittest.TestCase):
             self.assertEqual(context_payload["remote_micro_credential_id"], 61)
             self.assertEqual(context_payload["current_remote_learning_session_id"], 1122)
             self.assertEqual(context_payload["current_competency"], "Digital maturity assessment")
-            self.assertTrue(context_payload["current_prompt"])
+            self.assertIsNone(context_payload["current_prompt"])
             local_session_id = context_payload["session_id"]
             self.assertNotEqual(local_session_id, "1122")
 

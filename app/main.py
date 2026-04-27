@@ -1304,22 +1304,12 @@ async def session_interact(session_id: str, req: Optional[SessionInteractRequest
     session = _get_session_for_interact(session_id, payload.auth_token)
 
     if not payload.has_text:
-        preassessment_started = None
-        if session.phase == "pre_assessment" and not session.pre_assessment_prompt:
-            preassessment_started = await handle_pre_assessment_start(session)
-            _log_event(
-                session.session_id,
-                session.learner_id,
-                f"/session/{session_id}/interact",
-                "pre_assessment_started_via_interact",
-                {"competency": session.current_competency},
-            )
         return {
             **_build_session_payload(session),
             "counted_as_interaction": False,
             "history": _session_history_payload(session),
             "current_prompt": _current_pending_prompt(session),
-            "interaction_result": preassessment_started,
+            "interaction_result": None,
         }
 
     if session.phase == "pre_assessment":

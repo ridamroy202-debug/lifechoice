@@ -701,6 +701,34 @@ class EngineFlowTests(unittest.TestCase):
             self.assertEqual(payload["rubric_rules"]["competency_id"], 61)
             self.assertTrue(payload["rubric_rules"]["rubric_rules"])
 
+    def test_backend_learning_session_interact_accepts_simplified_body(self):
+        recorded: dict[str, object] = {}
+
+        def fake_record_interaction(**kwargs):
+            recorded.update(kwargs)
+            return {"success": True}
+
+        backend = self.main_mod.remote_backend_client
+        backend.record_interaction = fake_record_interaction
+
+        with TestClient(self.app) as client:
+            response = client.post(
+                "/backend/learning/sessions/1140/interact",
+                json={
+                    "auth_token": "token",
+                    "message": "A generated teaching response for the learner.",
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+
+        self.assertEqual(recorded["session_id"], 1140)
+        self.assertEqual(recorded["interaction_type"], "teaching")
+        self.assertEqual(recorded["ai_response"], "A generated teaching response for the learner.")
+        self.assertEqual(recorded["ai_prompt"], "Interaction forwarded by the AI engine backend proxy.")
+        self.assertEqual(recorded["learner_input"], None)
+        self.assertEqual(recorded["formative_passed"], None)
+        self.assertEqual(recorded["token"], "token")
+
     def test_backend_profile_competencies_access_and_learning_session_routes(self):
         with TestClient(self.app) as client:
             profile = client.post(

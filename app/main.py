@@ -200,12 +200,46 @@ class BackendLearningSessionStartRequest(BaseModel):
 
 
 class BackendLearningInteractionRequest(BaseModel):
-    interaction_type: str = "teaching"
-    ai_prompt: str
-    ai_response: str
+    auth_token: Optional[str] = None
+    message: Optional[str] = Field(
+        default=None,
+        description="Simplified frontend field. When provided, it is used as the AI response payload if ai_response is omitted.",
+    )
+    interaction_type: Optional[str] = Field(
+        default=None,
+        description="Optional. Defaults to 'teaching' when omitted.",
+    )
+    ai_prompt: Optional[str] = Field(
+        default=None,
+        description="Optional legacy/internal field. Defaults to a backend-generated placeholder when omitted.",
+    )
+    ai_response: Optional[str] = Field(
+        default=None,
+        description="Optional legacy/internal field. If omitted, the route uses `message`.",
+    )
     learner_input: Optional[str] = None
     formative_passed: Optional[bool] = None
-    auth_token: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_payload(self):
+        if not (self.ai_response or self.message):
+            raise ValueError("Provide either 'message' or 'ai_response'.")
+        return self
+
+    @property
+    def resolved_interaction_type(self) -> str:
+        return (self.interaction_type or "teaching").strip() or "teaching"
+
+    @property
+    def resolved_ai_prompt(self) -> str:
+        prompt = (self.ai_prompt or "").strip()
+        if prompt:
+            return prompt
+        return "Interaction forwarded by the AI engine backend proxy."
+
+    @property
+    def resolved_ai_response(self) -> str:
+        return str(self.ai_response or self.message or "").strip()
 
 
 class BackendLearningAssessmentRequest(BaseModel):
@@ -1001,9 +1035,9 @@ def backend_learning_session_interact(session_id: int, req: BackendLearningInter
     try:
         payload = remote_backend_client.record_interaction(
             session_id=session_id,
-            interaction_type=req.interaction_type,
-            ai_prompt=req.ai_prompt,
-            ai_response=req.ai_response,
+            interaction_type=req.resolved_interaction_type,
+            ai_prompt=req.resolved_ai_prompt,
+            ai_response=req.resolved_ai_response,
             learner_input=req.learner_input,
             formative_passed=req.formative_passed,
             token=effective_token,

@@ -14,7 +14,7 @@ class TutorCrew():
     def tutor(self) -> Agent:
         return Agent(
             config=self.agents_config['personal_ai_tutor_agent'],
-            llm=LLM(model=settings.openai_complex_model, temperature=0.45, max_tokens=6144),
+            llm=LLM(model=settings.anthropic_model, provider="anthropic", temperature=0.45, max_tokens=6144),
             verbose=False,
             max_iter=3,
         )

@@ -1,7 +1,6 @@
-import os
 import time
 from fastapi.testclient import TestClient
-from openai import OpenAI
+from anthropic import Anthropic
 
 from app.main import app, init_db
 from app.settings import get_settings
@@ -9,17 +8,21 @@ from app.settings import get_settings
 def run():
     init_db()
     settings = get_settings()
-    client = OpenAI(api_key=settings.openai_api_key)
+    client = Anthropic(api_key=settings.anthropic_api_key)
     tc = TestClient(app)
     auth_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoiYWNjZXNzIiwiZXhwIjoxNzgyMzY2NTY0LCJpYXQiOjE3NzcxODI1NjQsImp0aSI6IjNhNTc0YmMzYzNiMDRjYjBhODYzMGJjYjBmMDE0NDNlIiwidXNlcl9pZCI6IjQifQ.9DtBQ6xFbND1kFJ2kPBtXoHjpCnltCTxW9aBpWWRBB8"
 
     def answer_prompt(prompt, competency):
         sys_msg = f"You are a skilled professional learning {competency}. Answer the following prompt directly, concisely (1-3 sentences), demonstrating strong practical understanding."
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}]
+        resp = client.messages.create(
+            model=settings.anthropic_model,
+            max_tokens=220,
+            temperature=0.2,
+            system=sys_msg,
+            messages=[{"role": "user", "content": prompt}],
         )
-        return resp.choices[0].message.content
+        chunks = [block.text for block in resp.content if getattr(block, "type", "") == "text"]
+        return "".join(chunks).strip()
 
     print("Starting auto-learner...")
     res = tc.post("/session/1158/interact", json={"message": "", "auth_token": auth_token})

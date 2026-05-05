@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from openai import OpenAI
+from anthropic import Anthropic
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +55,7 @@ STOPWORDS = {
     "would",
 }
 
-OPENAI_CLIENT = OpenAI(api_key=settings.openai_api_key)
+ANTHROPIC_CLIENT = Anthropic(api_key=settings.anthropic_api_key)
 
 
 def extract_keywords(text: str, limit: int = 3) -> list[str]:
@@ -79,18 +79,16 @@ def build_preassessment_answer(competency: str) -> str:
 
 
 def generate_targeted_answer(competency: str, prompt_text: str, *, label: str) -> str:
-    response = OPENAI_CLIENT.chat.completions.create(
-        model=settings.openai_default_model,
+    response = ANTHROPIC_CLIENT.messages.create(
+        model=settings.anthropic_model,
+        max_tokens=280,
         temperature=0.2,
+        system=(
+            "You are simulating a serious learner. "
+            "Answer the teacher's prompt directly in 2-3 concise sentences. "
+            "Be applied, competency-specific, and explain why the action makes sense."
+        ),
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are simulating a serious learner. "
-                    "Answer the teacher's prompt directly in 2-3 concise sentences. "
-                    "Be applied, competency-specific, and explain why the action makes sense."
-                ),
-            },
             {
                 "role": "user",
                 "content": (
@@ -99,10 +97,11 @@ def generate_targeted_answer(competency: str, prompt_text: str, *, label: str) -
                     f"Teacher prompt:\n{prompt_text}\n\n"
                     "Write only the learner answer."
                 ),
-            },
+            }
         ],
     )
-    return (response.choices[0].message.content or "").strip()
+    parts = [block.text for block in response.content if getattr(block, "type", "") == "text"]
+    return "".join(parts).strip()
 
 
 def build_learning_answer(competency: str, current_subpart: str, turn: int) -> str:

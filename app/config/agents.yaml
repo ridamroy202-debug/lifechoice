@@ -1,6 +1,6 @@
 # ─── Pre-Assessment Diagnostic Agent ─────────────────────────────────────────
 diagonistic_agent:
-  llm: gpt-4o-mini
+  llm: claude-sonnet-4-6
   role: >
     Pre-Assessment Diagnostic Specialist
   goal: >
@@ -30,7 +30,7 @@ diagonistic_agent:
 
 # ─── Level Classifier Agent ─────────────────────────────────────────────────
 level_classifier_agent:
-  llm: gpt-4o-mini
+  llm: claude-sonnet-4-6
   role: >
     Learner Level Classifier
   goal: >
@@ -61,7 +61,7 @@ level_classifier_agent:
 
 # ─── Learning Path Planner Agent ────────────────────────────────────────────
 learning_path_planner_agent:
-  llm: gpt-4o-mini
+  llm: claude-sonnet-4-6
   role: >
     Adaptive Learning Path Architect
   goal: >
@@ -116,7 +116,7 @@ learning_path_planner_agent:
 
 # ─── Scenario Content Generator Agent ───────────────────────────────────────
 senario_content_generator_agent:
-  llm: gpt-4o
+  llm: claude-sonnet-4-6
   role: >
     Professional Scenario Content Generator
   goal: >
@@ -158,7 +158,7 @@ senario_content_generator_agent:
 
 # ─── Personal AI Tutor Agent ────────────────────────────────────────────────
 personal_ai_tutor_agent:
-  llm: gpt-4o
+  llm: claude-sonnet-4-6
   role: >
     Personal AI Tutor — Expert Learning Companion
   goal: >
@@ -346,3 +346,5 @@ assessment_evaluator_agent:
     - Never give scores without justification
     - If the response is off-topic or empty, score 0 with clear explanation
     - Respond ONLY with valid JSON. No extra text.
+
+

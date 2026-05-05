@@ -90,9 +90,9 @@ def get_settings() -> Settings:
     return Settings(
         openai_api_key=env_str("OPENAI_API_KEY"),
         anthropic_api_key=env_str("ANTHROPIC_API_KEY"),
-        openai_default_model=env_str("MODEL_NAME", "gpt-4o-mini"),
-        openai_complex_model=env_str("OPENAI_COMPLEX_MODEL", "gpt-4o"),
-        anthropic_model=env_str("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+        openai_default_model=env_str("MODEL_NAME", "claude-sonnet-4-6"),
+        openai_complex_model=env_str("OPENAI_COMPLEX_MODEL", "claude-sonnet-4-6"),
+        anthropic_model=env_str("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
         log_level=env_str("LOG_LEVEL", "INFO").upper(),
         ai_engine_db_path=env_path("AI_ENGINE_DB_PATH", default_db),
         remote_backend_url=env_str("REMOTE_BACKEND_URL", "https://lifechoice.duckdns.org").rstrip("/"),

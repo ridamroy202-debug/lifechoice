@@ -14,7 +14,7 @@ class StudyMeterial():
     def materials(self) -> Agent:
         return Agent(
             config=self.agents_config['senario_content_generator_agent'],
-            llm=LLM(model=settings.openai_complex_model, temperature=0.3, max_tokens=8192),
+            llm=LLM(model=settings.anthropic_model, provider="anthropic", temperature=0.3, max_tokens=8192),
             verbose=False,
         )
 

@@ -15,7 +15,7 @@ class PreAssessCrew():
     def materials(self) -> Agent:
         return Agent(
             config=self.agents_config['diagonistic_agent'],
-            llm=LLM(model=settings.openai_default_model, temperature=0.5),
+            llm=LLM(model=settings.anthropic_model, provider="anthropic", temperature=0.5),
             verbose=False,
         )
 

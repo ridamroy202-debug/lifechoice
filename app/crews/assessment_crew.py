@@ -14,7 +14,7 @@ class AssessmentCrew():
     def evaluator(self) -> Agent:
         return Agent(
             config=self.agents_config['assessment_evaluator_agent'],
-            llm=LLM(model=settings.anthropic_model, temperature=0.2),
+            llm=LLM(model=settings.anthropic_model, provider="anthropic", temperature=0.2),
             verbose=False,
         )
 

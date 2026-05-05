@@ -13,7 +13,7 @@ class LevelClassifierCrew():
     def classifier(self) -> Agent:
         return Agent(
             config=self.agents_config['level_classifier_agent'],
-            llm=LLM(model=settings.openai_default_model),
+            llm=LLM(model=settings.anthropic_model, provider="anthropic"),
             verbose=False
         )
 

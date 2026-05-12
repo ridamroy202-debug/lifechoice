@@ -1160,13 +1160,13 @@ class RemoteBackendContractTests(unittest.TestCase):
             client.fetch_gamification_progress(501, token="token")
 
         urls = [url for _, url in calls]
-        self.assertIn("https://lifechoice.duckdns.org/auth/login/login/", urls)
-        self.assertIn("https://lifechoice.duckdns.org/auth/profile/me/", urls)
-        self.assertIn("https://lifechoice.duckdns.org/lesson/competencies/", urls)
-        self.assertIn("https://lifechoice.duckdns.org/enrollment/enrollments/check-access/197/", urls)
-        self.assertIn("https://lifechoice.duckdns.org/learning/sessions/start/", urls)
-        self.assertIn("https://lifechoice.duckdns.org/learning/sessions/501/", urls)
-        self.assertIn("https://lifechoice.duckdns.org/gamification/progress/501/", urls)
+        self.assertIn("https://api.ikonskills.ac/auth/login/login/", urls)
+        self.assertIn("https://api.ikonskills.ac/auth/profile/me/", urls)
+        self.assertIn("https://api.ikonskills.ac/lesson/competencies/", urls)
+        self.assertIn("https://api.ikonskills.ac/enrollment/enrollments/check-access/197/", urls)
+        self.assertIn("https://api.ikonskills.ac/learning/sessions/start/", urls)
+        self.assertIn("https://api.ikonskills.ac/learning/sessions/501/", urls)
+        self.assertIn("https://api.ikonskills.ac/gamification/progress/501/", urls)
 
     def test_record_interaction_falls_back_for_extended_types(self):
         from app.remote_backend import RemoteBackendClient

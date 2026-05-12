@@ -95,7 +95,7 @@ def get_settings() -> Settings:
         anthropic_model=env_str("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
         log_level=env_str("LOG_LEVEL", "INFO").upper(),
         ai_engine_db_path=env_path("AI_ENGINE_DB_PATH", default_db),
-        remote_backend_url=env_str("REMOTE_BACKEND_URL", "https://lifechoice.duckdns.org").rstrip("/"),
+        remote_backend_url=env_str("REMOTE_BACKEND_URL", "https://api.ikonskills.ac").rstrip("/"),
         remote_api_token=env_str("REMOTE_API_TOKEN"),
         rubric_admin_key=env_str("RUBRIC_ADMIN_KEY"),
         cors_allowed_origins=env_list(
@@ -108,6 +108,7 @@ def get_settings() -> Settings:
                 "http://54.151.241.98",
                 "https://www.ikonskills.ac",
                 "https://ikonskills.ac",
+                'https://ikonskills.ac/'
             ),
         ),
     )

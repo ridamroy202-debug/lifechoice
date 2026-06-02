@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from app.settings import settings
 from app.crews.ai_tutor_agents_crew import TutorCrew
 from app.crews.assessment_crew import AssessmentCrew
 from app.crews.pre_assessment_crew import PreAssessCrew

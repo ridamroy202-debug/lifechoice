@@ -169,6 +169,9 @@ def configure_logging() -> None:
     settings = get_settings()
     level = getattr(logging, settings.log_level, logging.INFO)
     logging.basicConfig(level=level)
+    # Keep dependency transport logs quiet in normal runs (especially CI tests).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     _LOGGING_CONFIGURED = True
 
 

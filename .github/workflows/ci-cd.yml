@@ -39,7 +39,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-
       - name: Run test suite
         env:
           RUBRIC_ADMIN_KEY: test-admin-key
@@ -79,7 +78,6 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
-
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -107,64 +105,39 @@ jobs:
           EC2_APP_PORT: ${{ secrets.EC2_APP_PORT }}
         run: |
           set -euo pipefail
-
           if [ -z "${EC2_HOST}" ] || [ -z "${EC2_USER}" ] || [ -z "${EC2_SSH_KEY}" ]; then
             echo "Missing one or more required EC2 secrets: EC2_HOST, EC2_USER, EC2_SSH_KEY" >&2
             exit 1
           fi
-
           SSH_PORT="${EC2_PORT:-22}"
           APP_PORT="8001"
-
-          echo "Connecting to ${EC2_USER}@${EC2_HOST}:${SSH_PORT}"
-
           mkdir -p ~/.ssh
-          printf '%s' "${EC2_SSH_KEY}" > ~/.ssh/lifechoice_ec2_key
+          printf '%s\n' "${EC2_SSH_KEY}" > ~/.ssh/lifechoice_ec2_key
           chmod 600 ~/.ssh/lifechoice_ec2_key
-
-          echo "Scanning host keys..."
-          ssh-keyscan -p "${SSH_PORT}" "${EC2_HOST}" >> ~/.ssh/known_hosts 2>&1 || true
-          if [ ! -s ~/.ssh/known_hosts ]; then
-            echo "ssh-keyscan returned no keys. Verifying connectivity..."
-            if nc -z -w 5 "${EC2_HOST}" "${SSH_PORT}"; then
-              echo "Port ${SSH_PORT} is open but host keys could not be retrieved."
-            else
-              echo "Port ${SSH_PORT} is not reachable on ${EC2_HOST}."
-            fi
-            exit 1
-          fi
-          echo "Host keys acquired."
-
-          ssh -o ConnectTimeout=10 -i ~/.ssh/lifechoice_ec2_key -p "${SSH_PORT}" "${EC2_USER}@${EC2_HOST}" \
+          ssh-keyscan -p "${SSH_PORT}" "${EC2_HOST}" >> ~/.ssh/known_hosts
+          ssh -i ~/.ssh/lifechoice_ec2_key -p "${SSH_PORT}" "${EC2_USER}@${EC2_HOST}" \
             "DOCKERHUB_IMAGE='${DOCKERHUB_IMAGE}:latest' CONTAINER_NAME='${IMAGE_NAME}' APP_PORT='${APP_PORT}' bash -s" <<'REMOTE'
           set -euo pipefail
-
           ENV_FILE_PATH=""
           if [ -f "$HOME/.env" ]; then
             ENV_FILE_PATH="$HOME/.env"
           elif [ -f "$HOME/lifechoice-ai-engine.env" ]; then
             ENV_FILE_PATH="$HOME/lifechoice-ai-engine.env"
           fi
-
           if [ -z "$ENV_FILE_PATH" ]; then
             echo "No deployment env file found. Expected one of: $HOME/.env or $HOME/lifechoice-ai-engine.env" >&2
             exit 1
           fi
-
           echo "Using deployment env file: $ENV_FILE_PATH"
-
           DOCKER="docker"
           if ! docker ps >/dev/null 2>&1; then
             DOCKER="sudo docker"
           fi
-
           $DOCKER pull "$DOCKERHUB_IMAGE"
-
           if $DOCKER ps -a --format '{{.Names}}' | grep -Fx "$CONTAINER_NAME" >/dev/null; then
             $DOCKER stop "$CONTAINER_NAME" || true
             $DOCKER rm "$CONTAINER_NAME" || true
           fi
-
           PORT_CONTAINERS="$($DOCKER ps -q --filter "publish=$APP_PORT")"
           if [ -n "$PORT_CONTAINERS" ]; then
             echo "Removing existing Docker container(s) already publishing port $APP_PORT:"
@@ -173,10 +146,8 @@ jobs:
               $DOCKER rm -f "$container_id"
             done
           fi
-
           $DOCKER volume create lifechoice-ai-engine-data >/dev/null
           $DOCKER volume create lifechoice-ai-engine-certificates >/dev/null
-
           $DOCKER run -d \
             --name "$CONTAINER_NAME" \
             --restart unless-stopped \
@@ -185,28 +156,23 @@ jobs:
             -v lifechoice-ai-engine-data:/app/data \
             -v lifechoice-ai-engine-certificates:/app/generated_certificates \
             "$DOCKERHUB_IMAGE"
-
           for attempt in $(seq 1 30); do
             if [ "$($DOCKER inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" != "true" ]; then
               echo "Container stopped before becoming healthy." >&2
               $DOCKER logs "$CONTAINER_NAME" || true
               exit 1
             fi
-
             if curl --fail --silent --show-error "http://127.0.0.1:$APP_PORT/openapi.json" >/dev/null; then
               echo "Deployment health check passed."
               break
             fi
-
             if [ "$attempt" -eq 30 ]; then
               echo "Container did not become healthy after 60 seconds." >&2
               $DOCKER ps -a --filter "name=$CONTAINER_NAME"
               $DOCKER logs "$CONTAINER_NAME" || true
               exit 1
             fi
-
             sleep 2
           done
-
           $DOCKER image prune -f
           REMOTE

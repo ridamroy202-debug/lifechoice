@@ -156,6 +156,10 @@ class EngineFlowTests(unittest.TestCase):
         os.environ["ASYNC_REMOTE_SYNC"] = "0"
         os.chdir(cls.repo)
 
+        import importlib
+        import app.settings as settings_mod
+        importlib.reload(settings_mod)
+
         from app.main import app
         import app.main as main_mod
         import app.orchestrator as orch

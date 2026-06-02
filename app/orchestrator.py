@@ -1314,7 +1314,7 @@ def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -
             f"{summary} Warning: the answer passed overall, but scenario-specific alignment looked weak in heuristic validation."
         ).strip()
 
-    logger.info(
+    logger.debug(
         "Formative evaluation competency=%s prompt=%r learner_answer=%r raw_payload=%s normalized=%s heuristics=%s final_passed=%s final_percent=%.2f",
         session.current_competency,
         prompt[:300],

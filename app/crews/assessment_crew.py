@@ -42,12 +42,3 @@ def get_assessment_crew() -> Crew:
     if _assessment_crew_instance is None:
         _assessment_crew_instance = AssessmentCrew().crew()
     return _assessment_crew_instance
-
-# Module-level singleton
-_assessment_crew_instance: Crew | None = None
-
-def get_assessment_crew() -> Crew:
-    global _assessment_crew_instance
-    if _assessment_crew_instance is None:
-        _assessment_crew_instance = AssessmentCrew().crew()
-    return _assessment_crew_instance

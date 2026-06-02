@@ -25,6 +25,7 @@ _ENV_KEYS_TO_NORMALIZE = (
     "MATERIALS_MAX_TOKENS",
     "CHAT_HISTORY_TURNS",
     "AIP11_TIME_FLOOR_SECONDS",
+    "ASYNC_REMOTE_SYNC",
     "RUBRIC_ADMIN_KEY",
     "CORS_ALLOWED_ORIGINS",
 )
@@ -89,6 +90,14 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_bool(name: str, default: bool) -> bool:
+    load_environment()
+    raw = env_str(name, "")
+    if not raw:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     openai_api_key: str
@@ -106,6 +115,7 @@ class Settings:
     materials_max_tokens: int
     chat_history_turns: int
     aip11_time_floor_seconds: int
+    async_remote_sync: bool
     rubric_admin_key: str
     cors_allowed_origins: tuple[str, ...]
 
@@ -137,6 +147,7 @@ def get_settings() -> Settings:
         materials_max_tokens=max(512, env_int("MATERIALS_MAX_TOKENS", 2200)),
         chat_history_turns=max(4, env_int("CHAT_HISTORY_TURNS", 8)),
         aip11_time_floor_seconds=max(0, env_int("AIP11_TIME_FLOOR_SECONDS", 90)),
+        async_remote_sync=env_bool("ASYNC_REMOTE_SYNC", True),
         rubric_admin_key=env_str("RUBRIC_ADMIN_KEY"),
         cors_allowed_origins=env_list(
             "CORS_ALLOWED_ORIGINS",

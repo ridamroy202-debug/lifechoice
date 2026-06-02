@@ -1507,8 +1507,6 @@ def _record_remote_teaching_interaction(
     if not remote_learning_session_id:
         return
 
-    # Fire-and-forget in a thread — never blocks the learner response
-    import threading
     def _sync():
         try:
             remote_backend_client.record_interaction(
@@ -1526,7 +1524,14 @@ def _record_remote_teaching_interaction(
             return
         _set_remote_sync_success(session, remote_learning_session_id)
 
-    threading.Thread(target=_sync, daemon=True).start()
+    if settings.async_remote_sync:
+        # Fire-and-forget in a thread for production latency.
+        import threading
+
+        threading.Thread(target=_sync, daemon=True).start()
+    else:
+        # Deterministic path for tests and lock-sensitive environments.
+        _sync()
 
 
 def _generate_learning_response(session: LearnerSession, user_message: str, formative_feedback: str = "") -> tuple[str, str]:

@@ -1,8 +1,8 @@
 from pydantic import BaseModel, Field
-from typing import List, Literal, Dict, Optional
+from typing import Any, List, Literal, Dict, Optional
 
 class UserLevel(BaseModel):
-    level: Literal['beginner', 'intermediate','advance']
+    level: Literal['beginner', 'intermediate', 'advanced']
     weak_areas : List[str] = Field(default_factory=list)
 
 class ChatMessage(BaseModel):
@@ -36,7 +36,7 @@ class AssessmentRequest(BaseModel):
     user_response: str
 
 class AssessmentResult(BaseModel):
-    criteria_score: List[Dict[str,any]]
+    criteria_score: List[Dict[str, Any]]
     overall_percent: float
     pass_: bool = Field(alias='pass')
 

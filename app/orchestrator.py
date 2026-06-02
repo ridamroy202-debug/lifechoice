@@ -1560,7 +1560,7 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
         4: "AIP-04",
     }.get(session.learning_turn, "AIP-04")
 
-    # Pre-fetch MCQ only for retry slots to save cost after a failed formative.
+    # Pre-fetch MCQ from backend API on retry slots after a failed formative.
     # First-attempt formative checks remain scenario-based and AI-generated.
     _prefetched_fa_question: dict | None = None
     _prefetch_fa_phase: str | None = None
@@ -1585,7 +1585,7 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
                     fa_phase=_pf_fa_phase,
                     attempt_number=session.competency_attempt_number,
                     auth_token=session.remote_auth_token,
-                    is_retry=True,
+                    is_retry=False,
                 )
                 _prefetch_fa_phase = _pf_fa_phase
                 _prefetch_fa_slot = _pf_fa_slot

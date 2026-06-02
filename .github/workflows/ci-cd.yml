@@ -116,12 +116,26 @@ jobs:
           SSH_PORT="${EC2_PORT:-22}"
           APP_PORT="8001"
 
-          mkdir -p ~/.ssh
-          printf '%s\n' "${EC2_SSH_KEY}" > ~/.ssh/lifechoice_ec2_key
-          chmod 600 ~/.ssh/lifechoice_ec2_key
-          ssh-keyscan -p "${SSH_PORT}" "${EC2_HOST}" >> ~/.ssh/known_hosts
+          echo "Connecting to ${EC2_USER}@${EC2_HOST}:${SSH_PORT}"
 
-          ssh -i ~/.ssh/lifechoice_ec2_key -p "${SSH_PORT}" "${EC2_USER}@${EC2_HOST}" \
+          mkdir -p ~/.ssh
+          printf '%s' "${EC2_SSH_KEY}" > ~/.ssh/lifechoice_ec2_key
+          chmod 600 ~/.ssh/lifechoice_ec2_key
+
+          echo "Scanning host keys..."
+          ssh-keyscan -p "${SSH_PORT}" "${EC2_HOST}" >> ~/.ssh/known_hosts 2>&1 || true
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "ssh-keyscan returned no keys. Verifying connectivity..."
+            if nc -z -w 5 "${EC2_HOST}" "${SSH_PORT}"; then
+              echo "Port ${SSH_PORT} is open but host keys could not be retrieved."
+            else
+              echo "Port ${SSH_PORT} is not reachable on ${EC2_HOST}."
+            fi
+            exit 1
+          fi
+          echo "Host keys acquired."
+
+          ssh -o ConnectTimeout=10 -i ~/.ssh/lifechoice_ec2_key -p "${SSH_PORT}" "${EC2_USER}@${EC2_HOST}" \
             "DOCKERHUB_IMAGE='${DOCKERHUB_IMAGE}:latest' CONTAINER_NAME='${IMAGE_NAME}' APP_PORT='${APP_PORT}' bash -s" <<'REMOTE'
           set -euo pipefail
 

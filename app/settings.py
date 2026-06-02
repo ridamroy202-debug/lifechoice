@@ -24,6 +24,7 @@ _ENV_KEYS_TO_NORMALIZE = (
     "TEACHING_MAX_TOKENS",
     "MATERIALS_MAX_TOKENS",
     "CHAT_HISTORY_TURNS",
+    "AIP11_TIME_FLOOR_SECONDS",
     "RUBRIC_ADMIN_KEY",
     "CORS_ALLOWED_ORIGINS",
 )
@@ -104,6 +105,7 @@ class Settings:
     teaching_max_tokens: int
     materials_max_tokens: int
     chat_history_turns: int
+    aip11_time_floor_seconds: int
     rubric_admin_key: str
     cors_allowed_origins: tuple[str, ...]
 
@@ -134,6 +136,7 @@ def get_settings() -> Settings:
         teaching_max_tokens=max(512, env_int("TEACHING_MAX_TOKENS", 1800)),
         materials_max_tokens=max(512, env_int("MATERIALS_MAX_TOKENS", 2200)),
         chat_history_turns=max(4, env_int("CHAT_HISTORY_TURNS", 8)),
+        aip11_time_floor_seconds=max(0, env_int("AIP11_TIME_FLOOR_SECONDS", 90)),
         rubric_admin_key=env_str("RUBRIC_ADMIN_KEY"),
         cors_allowed_origins=env_list(
             "CORS_ALLOWED_ORIGINS",

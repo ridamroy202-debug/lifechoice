@@ -152,6 +152,7 @@ class EngineFlowTests(unittest.TestCase):
         cls.db_file = cls.repo / "data" / "test_engine.db"
         os.environ["AI_ENGINE_DB_PATH"] = str(cls.db_file)
         os.environ["RUBRIC_ADMIN_KEY"] = "test-admin-key"
+        os.environ["AIP11_TIME_FLOOR_SECONDS"] = "0"
         os.chdir(cls.repo)
 
         from app.main import app

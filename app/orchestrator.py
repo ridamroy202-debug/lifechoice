@@ -2079,15 +2079,16 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     session.add_message("user", user_answer)
     anomalies = detect_and_record_anomalies(session, user_answer, "/assessment/competency", is_assessment=True)
 
-    # Phase 6.3: Time-floor enforcement (90 seconds for AIP-11)
-    if not check_time_floor(session.aip11_question_displayed_at, floor_seconds=90):
+    # Phase 6.3: Time-floor enforcement for AIP-11 (configurable; defaults to 90s).
+    floor_seconds = settings.aip11_time_floor_seconds
+    if floor_seconds > 0 and not check_time_floor(session.aip11_question_displayed_at, floor_seconds=floor_seconds):
         log_integrity_event(
             learner_id=session.learner_id,
             session_id=session.session_id,
             micro_credential_id=session.remote_micro_credential_id,
             core_competency_id=session.current_remote_competency_id,
             event_type="time_floor_breach",
-            event_detail={"floor_seconds": 90, "aip_phase": "AIP-11"},
+            event_detail={"floor_seconds": floor_seconds, "aip_phase": "AIP-11"},
         )
         save_session(session)
         return {

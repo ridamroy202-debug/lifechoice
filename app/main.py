@@ -2,7 +2,10 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from typing import Any, List, Optional
+from datetime import datetime, timezone
+import logging
 import re
+import time
 from app.session_manager import create_session, get_session, save_session
 from fastapi.responses import HTMLResponse, Response
 from app.certificates import (
@@ -86,6 +89,7 @@ app.add_middleware(
 )
 
 configure_logging()
+logger = logging.getLogger(__name__)
 
 _PLACEHOLDER_MESSAGES = {
     "string",
@@ -327,14 +331,15 @@ def _require_phase(session, expected: str):
         )
 
 
-def _session_history_payload(session, limit: int = 20) -> list[dict[str, Any]]:
+def _session_history_payload(session, limit: int | None = None) -> list[dict[str, Any]]:
+    effective_limit = limit or settings.chat_history_turns
     return [
         {
             "role": msg.role,
             "content": msg.content,
             "created_at": msg.created_at,
         }
-        for msg in session.messages[-limit:]
+        for msg in session.messages[-effective_limit:]
     ]
 
 
@@ -350,16 +355,68 @@ def _current_pending_prompt(session) -> Optional[str]:
     return None
 
 
-def _build_session_payload(session):
-    gamification = None
-    if session.current_remote_learning_session_id and session.remote_auth_token:
-        try:
-            gamification = remote_backend_client.fetch_gamification_progress(
-                session.current_remote_learning_session_id,
-                token=session.remote_auth_token,
-            )
-        except RemoteBackendError:
-            gamification = None
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _resolve_gamification_progress(session, *, refresh: bool) -> Optional[dict[str, Any]]:
+    if not (session.current_remote_learning_session_id and session.remote_auth_token):
+        return session.gamification_progress_cache
+
+    if not refresh:
+        return session.gamification_progress_cache
+
+    now = datetime.now(timezone.utc)
+    cached_at = _parse_iso_datetime(session.gamification_progress_cached_at)
+    has_cache = isinstance(session.gamification_progress_cache, dict)
+    if has_cache and cached_at is not None:
+        age_seconds = (now - cached_at).total_seconds()
+        if age_seconds < settings.remote_gamification_cache_seconds:
+            return session.gamification_progress_cache
+
+    started = time.perf_counter()
+    try:
+        gamification = remote_backend_client.fetch_gamification_progress(
+            session.current_remote_learning_session_id,
+            token=session.remote_auth_token,
+        )
+    except RemoteBackendError as exc:
+        logger.warning(
+            "gamification_refresh_failed session_id=%s remote_session_id=%s error=%s",
+            session.session_id,
+            session.current_remote_learning_session_id,
+            exc,
+        )
+        return session.gamification_progress_cache
+
+    session.gamification_progress_cache = gamification
+    session.gamification_progress_cached_at = now.isoformat()
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    if elapsed_ms >= 800:
+        logger.info(
+            "gamification_refresh_slow session_id=%s remote_session_id=%s elapsed_ms=%.1f",
+            session.session_id,
+            session.current_remote_learning_session_id,
+            elapsed_ms,
+        )
+    return gamification
+
+
+def _build_session_payload(session, *, refresh_remote_progress: bool = True):
+    gamification = _resolve_gamification_progress(session, refresh=refresh_remote_progress)
 
     return {
         "session_id": session.session_id,
@@ -445,8 +502,14 @@ def _build_session_payload(session):
     }
 
 
-def _build_interact_response(session, response: Optional[dict[str, Any]], *, counted_as_interaction: bool):
-    payload = _build_session_payload(session)
+def _build_interact_response(
+    session,
+    response: Optional[dict[str, Any]],
+    *,
+    counted_as_interaction: bool,
+    refresh_remote_progress: bool,
+):
+    payload = _build_session_payload(session, refresh_remote_progress=refresh_remote_progress)
     response = response or {}
     for key, value in response.items():
         if key in {"counted_as_interaction", "history", "current_prompt", "interaction_result"}:
@@ -1387,13 +1450,33 @@ async def learn_chat(req: LearnChatRequest):
     tags=["Sessions"],
 )
 async def session_interact(session_id: str, req: Optional[SessionInteractRequest] = None):
+    overall_started = time.perf_counter()
     payload = req or SessionInteractRequest()
     session = _get_session_for_interact(session_id, payload.auth_token)
+    phase_before = session.phase
     bootstrapped = await _ensure_interact_bootstrap(session)
 
     if not payload.has_text or bootstrapped:
-        return _build_interact_response(session, None, counted_as_interaction=False)
+        response_payload = _build_interact_response(
+            session,
+            None,
+            counted_as_interaction=False,
+            refresh_remote_progress=False,
+        )
+        elapsed_ms = (time.perf_counter() - overall_started) * 1000
+        logger.info(
+            "session_interact_timing session_id=%s phase_before=%s phase_after=%s bootstrapped=%s has_text=%s counted=%s total_ms=%.1f",
+            session_id,
+            phase_before,
+            session.phase,
+            bootstrapped,
+            payload.has_text,
+            False,
+            elapsed_ms,
+        )
+        return response_payload
 
+    handler_started = time.perf_counter()
     if session.phase == "pre_assessment":
         response = await handle_pre_assessment(session, payload.text)
         event_type = "pre_assessment_answered_via_interact"
@@ -1408,6 +1491,7 @@ async def session_interact(session_id: str, req: Optional[SessionInteractRequest
         event_type = "final_assessment_submitted_via_interact"
     else:
         raise HTTPException(status_code=400, detail="Session is already completed. No further interactions are allowed.")
+    handler_ms = (time.perf_counter() - handler_started) * 1000
 
     counted_as_interaction = bool(response.pop("counted_as_interaction", True))
 
@@ -1422,7 +1506,24 @@ async def session_interact(session_id: str, req: Optional[SessionInteractRequest
             "counted_as_interaction": counted_as_interaction,
         },
     )
-    return _build_interact_response(session, response, counted_as_interaction=counted_as_interaction)
+    response_payload = _build_interact_response(
+        session,
+        response,
+        counted_as_interaction=counted_as_interaction,
+        refresh_remote_progress=counted_as_interaction,
+    )
+    elapsed_ms = (time.perf_counter() - overall_started) * 1000
+    logger.info(
+        "session_interact_timing session_id=%s phase_before=%s phase_after=%s event=%s counted=%s handler_ms=%.1f total_ms=%.1f",
+        session_id,
+        phase_before,
+        session.phase,
+        event_type,
+        counted_as_interaction,
+        handler_ms,
+        elapsed_ms,
+    )
+    return response_payload
 
 
 @app.post(
@@ -1526,3 +1627,268 @@ def get_session_status(session_id: str):
     """
     session = _get_or_404(session_id)
     return _build_session_payload(session)
+
+# ── Admin Endpoints (Phase 3) ─────────────────────────────────────────────────
+
+class AdminGenerateQuestionsRequest(BaseModel):
+    micro_credential_id: int
+    competency_id: int
+    auth_token: Optional[str] = None
+
+
+class AdminClearIntegrityRequest(BaseModel):
+    event_id: int
+    admin_action: str  # "clear", "invalidate", "request_reassessment"
+
+
+@app.post(
+    "/admin/cc/generate-questions",
+    summary="Trigger question bank generation for a CC via remote backend",
+    tags=["Admin"],
+)
+def admin_generate_questions(req: AdminGenerateQuestionsRequest):
+    """
+    Proxies to the remote backend admin API to generate 120 MCQ questions
+    (40 FA1, 40 FA2, 40 FA3) for the specified competency.
+    """
+    token = req.auth_token or remote_backend_client.default_token or None
+    if not token:
+        raise HTTPException(status_code=400, detail="auth_token required")
+    try:
+        # This would call the remote backend's admin generation endpoint
+        # For now, we return a placeholder response
+        return {
+            "status": "triggered",
+            "micro_credential_id": req.micro_credential_id,
+            "competency_id": req.competency_id,
+            "message": "Question bank generation job triggered. Poll /admin/cc/{id}/generation-status for progress.",
+        }
+    except RemoteBackendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get(
+    "/admin/aip-usage",
+    summary="AIP usage dashboard — total calls, costs, and per-CC breakdown",
+    tags=["Admin"],
+)
+def admin_aip_usage(auth_token: Optional[str] = Header(None)):
+    """
+    Returns aggregated AIP usage statistics:
+    - Total live API calls
+    - Total question bank serves
+    - Estimated API cost
+    - Per-MC and per-CC breakdown
+    - Alerts for aip_count_used > 14
+    """
+    from app.db import get_connection
+    from app.persistence import get_platform_setting
+
+    cap = int(get_platform_setting("aip_cap_per_cc", "14"))
+    with get_connection() as conn:
+        # Total counts
+        total_live = conn.execute(
+            "SELECT COUNT(*) FROM aip_usage_log WHERE question_source = 'live_api'"
+        ).fetchone()[0]
+        total_bank = conn.execute(
+            "SELECT COUNT(*) FROM aip_usage_log WHERE question_source = 'question_bank'"
+        ).fetchone()[0]
+        total_cost = conn.execute(
+            "SELECT SUM(api_cost_estimate_usd) FROM aip_usage_log"
+        ).fetchone()[0] or 0.0
+
+        # Per-CC breakdown
+        cc_breakdown = conn.execute(
+            """
+            SELECT core_competency_id, competency_name,
+                   SUM(CASE WHEN question_source = 'live_api' THEN 1 ELSE 0 END) AS live_calls,
+                   SUM(CASE WHEN question_source = 'question_bank' THEN 1 ELSE 0 END) AS bank_calls,
+                   SUM(CASE WHEN question_source = 'live_api' THEN api_cost_estimate_usd ELSE 0 END) AS cost
+            FROM aip_usage_log
+            GROUP BY core_competency_id
+            ORDER BY live_calls DESC
+            """
+        ).fetchall()
+
+        # Alerts: aip_count_used > cap
+        alerts = conn.execute(
+            """
+            SELECT lcp.learner_id, lcp.competency_id, lcp.competency_name, lcp.aip_count_used
+            FROM learner_competency_progress lcp
+            WHERE lcp.aip_count_used > ?
+            """,
+            (cap,),
+        ).fetchall()
+
+    return {
+        "total_live_api_calls": total_live,
+        "total_question_bank_serves": total_bank,
+        "estimated_total_cost_usd": round(total_cost, 4),
+        "aip_cap_per_cc": cap,
+        "per_competency_breakdown": [
+            {
+                "competency_id": row["core_competency_id"],
+                "competency_name": row["competency_name"],
+                "live_calls": row["live_calls"],
+                "bank_calls": row["bank_calls"],
+                "cost_usd": round(row["cost"] or 0.0, 4),
+            }
+            for row in cc_breakdown
+        ],
+        "alerts": [
+            {
+                "learner_id": row["learner_id"],
+                "competency_id": row["competency_id"],
+                "competency_name": row["competency_name"],
+                "aip_count_used": row["aip_count_used"],
+            }
+            for row in alerts
+        ],
+    }
+
+
+@app.get(
+    "/admin/integrity-dashboard",
+    summary="Integrity dashboard — flags, holds, and admin actions",
+    tags=["Admin"],
+)
+def admin_integrity_dashboard(auth_token: Optional[str] = Header(None)):
+    """
+    Returns integrity event statistics:
+    - Total events by type (paste_detected, time_floor_breach, similarity_flag, probe_mismatch)
+    - Learners with 3+ unreviewed flags
+    - Submissions currently on hold
+    - Admin action log
+    """
+    from app.db import get_connection
+
+    with get_connection() as conn:
+        # Event counts by type
+        event_counts = conn.execute(
+            """
+            SELECT event_type, COUNT(*) AS cnt
+            FROM integrity_log
+            GROUP BY event_type
+            """
+        ).fetchall()
+
+        # Learners with 3+ unreviewed events
+        repeat_offenders = conn.execute(
+            """
+            SELECT learner_id, COUNT(*) AS cnt
+            FROM integrity_log
+            WHERE reviewed_by_admin = 0
+            GROUP BY learner_id
+            HAVING cnt >= 3
+            """
+        ).fetchall()
+
+        # Events on hold (combined similarity + paste/time-floor)
+        holds = conn.execute(
+            """
+            SELECT il.*, lcp.competency_name
+            FROM integrity_log il
+            LEFT JOIN learner_competency_progress lcp
+              ON lcp.learner_id = il.learner_id AND lcp.competency_id = il.core_competency_id
+            WHERE il.reviewed_by_admin = 0
+            ORDER BY il.id DESC
+            """
+        ).fetchall()
+
+        # Admin actions log
+        admin_actions = conn.execute(
+            """
+            SELECT event_id, admin_action_taken, triggered_at
+            FROM integrity_log
+            WHERE reviewed_by_admin = 1
+            ORDER BY id DESC
+            LIMIT 100
+            """
+        ).fetchall()
+
+    return {
+        "event_counts": {row["event_type"]: row["cnt"] for row in event_counts},
+        "repeat_offenders": [
+            {"learner_id": row["learner_id"], "flag_count": row["cnt"]}
+            for row in repeat_offenders
+        ],
+        "holds_on_review": [
+            {
+                "event_id": row["id"],
+                "learner_id": row["learner_id"],
+                "competency_name": row["competency_name"],
+                "event_type": row["event_type"],
+                "event_detail": json.loads(row["event_detail"]),
+                "triggered_at": row["triggered_at"],
+            }
+            for row in holds
+        ],
+        "admin_action_log": [
+            {"event_id": row["event_id"], "action": row["admin_action_taken"], "at": row["triggered_at"]}
+            for row in admin_actions
+        ],
+    }
+
+
+@app.post(
+    "/admin/integrity/clear",
+    summary="Clear or invalidate an integrity flag",
+    tags=["Admin"],
+)
+def admin_clear_integrity(req: AdminClearIntegrityRequest):
+    """
+    Admin action on an integrity event:
+    - clear: mark as genuine, allow verdict
+    - invalidate: mark as non-genuine, issue Not Yet Competent
+    - request_reassessment: route learner back to fresh AIP-11
+    """
+    from app.persistence import mark_integrity_event_reviewed
+
+    valid_actions = {"clear", "invalidate", "request_reassessment"}
+    if req.admin_action not in valid_actions:
+        raise HTTPException(status_code=400, detail=f"Invalid action. Must be one of: {valid_actions}")
+
+    mark_integrity_event_reviewed(req.event_id, req.admin_action)
+    return {"status": "processed", "event_id": req.event_id, "action": req.admin_action}
+
+
+@app.get(
+    "/admin/cc/{competency_id}/question-bank-status",
+    summary="Check if question bank is ready for a CC",
+    tags=["Admin"],
+)
+def admin_cc_question_bank_status(competency_id: int):
+    """
+    Returns whether the question bank is ready for a CC:
+    - total_questions (FA1 + FA2 + FA3)
+    - ready flag
+    - per-phase breakdown
+    """
+    from app.db import get_connection
+
+    with get_connection() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM question_bank WHERE core_competency_id = ? AND is_active = 1",
+            (competency_id,),
+        ).fetchone()[0]
+        fa1 = conn.execute(
+            "SELECT COUNT(*) FROM question_bank WHERE core_competency_id = ? AND aip_phase = 'FA1' AND is_active = 1",
+            (competency_id,),
+        ).fetchone()[0]
+        fa2 = conn.execute(
+            "SELECT COUNT(*) FROM question_bank WHERE core_competency_id = ? AND aip_phase = 'FA2' AND is_active = 1",
+            (competency_id,),
+        ).fetchone()[0]
+        fa3 = conn.execute(
+            "SELECT COUNT(*) FROM question_bank WHERE core_competency_id = ? AND aip_phase = 'FA3' AND is_active = 1",
+            (competency_id,),
+        ).fetchone()[0]
+
+    return {
+        "competency_id": competency_id,
+        "question_bank_ready": total >= 120,
+        "total_questions": total,
+        "fa1_count": fa1,
+        "fa2_count": fa2,
+        "fa3_count": fa3,
+    }

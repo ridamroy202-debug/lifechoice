@@ -639,3 +639,342 @@ def get_remote_session_mapping(remote_session_id: int) -> dict[str, Any] | None:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+
+# ── platform_settings ─────────────────────────────────────────────────────────
+
+def get_platform_setting(key: str, default: str = "") -> str:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT value FROM platform_settings WHERE key = ?", (key,)
+        ).fetchone()
+    return str(row["value"]) if row else default
+
+
+# ── question_bank (local cache of remote MCQ questions) ───────────────────────
+
+def cache_question(
+    remote_question_id: int,
+    core_competency_id: int | None,
+    competency_title: str,
+    micro_credential: str | None,
+    question_text: str,
+    option_a: str,
+    option_b: str,
+    option_c: str,
+    option_d: str,
+    correct_answer: str,
+    explanation: str | None,
+    difficulty_level: str | None,
+    aip_phase: str,
+) -> int:
+    """Cache a remote MCQ question locally. Returns local question_bank id."""
+    now = utc_now_iso()
+    with get_connection() as conn:
+        existing = conn.execute(
+            "SELECT id FROM question_bank WHERE remote_question_id = ? AND aip_phase = ?",
+            (remote_question_id, aip_phase),
+        ).fetchone()
+        if existing:
+            return int(existing["id"])
+        cursor = conn.execute(
+            """
+            INSERT INTO question_bank
+            (remote_question_id, core_competency_id, competency_title, micro_credential,
+             question_text, option_a, option_b, option_c, option_d, correct_answer,
+             explanation, difficulty_level, aip_phase, generated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                remote_question_id, core_competency_id, competency_title, micro_credential,
+                question_text, option_a, option_b, option_c, option_d, correct_answer,
+                explanation, difficulty_level, aip_phase, now,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def get_cached_questions(
+    competency_title: str,
+    aip_phase: str,
+    exclude_remote_ids: list[int] | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Fetch cached questions for a CC+phase, excluding recently served ones."""
+    exclude_remote_ids = exclude_remote_ids or []
+    with get_connection() as conn:
+        if exclude_remote_ids:
+            placeholders = ",".join("?" * len(exclude_remote_ids))
+            rows = conn.execute(
+                f"""
+                SELECT id, remote_question_id, question_text, option_a, option_b, option_c, option_d,
+                       correct_answer, explanation, difficulty_level, aip_phase
+                FROM question_bank
+                WHERE competency_title = ? AND aip_phase = ? AND is_active = 1
+                  AND remote_question_id NOT IN ({placeholders})
+                ORDER BY times_served ASC, RANDOM()
+                LIMIT ?
+                """,
+                [competency_title, aip_phase, *exclude_remote_ids, limit],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, remote_question_id, question_text, option_a, option_b, option_c, option_d,
+                       correct_answer, explanation, difficulty_level, aip_phase
+                FROM question_bank
+                WHERE competency_title = ? AND aip_phase = ? AND is_active = 1
+                ORDER BY times_served ASC, RANDOM()
+                LIMIT ?
+                """,
+                (competency_title, aip_phase, limit),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def increment_question_served(question_bank_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE question_bank SET times_served = times_served + 1 WHERE id = ?",
+            (question_bank_id,),
+        )
+
+
+def get_question_by_id(question_bank_id: int) -> dict[str, Any] | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM question_bank WHERE id = ?", (question_bank_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def count_active_questions(competency_title: str, aip_phase: str) -> int:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM question_bank WHERE competency_title = ? AND aip_phase = ? AND is_active = 1",
+            (competency_title, aip_phase),
+        ).fetchone()
+    return int(row["cnt"]) if row else 0
+
+
+# ── aip_usage_log ─────────────────────────────────────────────────────────────
+
+def log_aip_usage(
+    learner_id: str | None,
+    core_competency_id: int | None,
+    micro_credential_id: int | None,
+    question_source: str,
+    aip_phase: str,
+    aip_count_at_time: int,
+    attempt_number: int = 1,
+    question_bank_id: int | None = None,
+    api_cost_estimate_usd: float = 0.00,
+    session_id: str | None = None,
+    competency_name: str | None = None,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO aip_usage_log
+            (learner_id, core_competency_id, micro_credential_id, question_source,
+             question_bank_id, aip_phase, aip_count_at_time, attempt_number,
+             triggered_at, api_cost_estimate_usd, session_id, competency_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                learner_id, core_competency_id, micro_credential_id, question_source,
+                question_bank_id, aip_phase, aip_count_at_time, attempt_number,
+                utc_now_iso(), api_cost_estimate_usd, session_id, competency_name,
+            ),
+        )
+
+
+# ── learner_cc_progress (extended learner_competency_progress) ────────────────
+
+def get_learner_cc_aip_count(learner_id: str, competency_id: int) -> int:
+    """Returns current aip_count_used for a learner+CC. Returns 0 if no record."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT aip_count_used FROM learner_competency_progress WHERE learner_id = ? AND competency_id = ?",
+            (learner_id, competency_id),
+        ).fetchone()
+    return int(row["aip_count_used"]) if row else 0
+
+
+def increment_learner_cc_aip_count(learner_id: str, competency_id: int, micro_credential_id: int) -> int:
+    """Atomically increments aip_count_used. Returns new count."""
+    now = utc_now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO learner_competency_progress
+            (learner_id, micro_credential_id, competency_id, competency_name, passed,
+             aip_count_used, aip11_attempts, attempts_count, status, enrolled_at, last_attempt_at, updated_at)
+            VALUES (?, ?, ?, '', 0, 1, 0, 0, 'in_progress', ?, ?, ?)
+            ON CONFLICT(learner_id, micro_credential_id, competency_id) DO UPDATE SET
+                aip_count_used = aip_count_used + 1,
+                last_attempt_at = excluded.last_attempt_at,
+                updated_at = excluded.updated_at
+            """,
+            (learner_id, micro_credential_id, competency_id, now, now, now),
+        )
+        row = conn.execute(
+            "SELECT aip_count_used FROM learner_competency_progress WHERE learner_id = ? AND competency_id = ?",
+            (learner_id, competency_id),
+        ).fetchone()
+    return int(row["aip_count_used"]) if row else 1
+
+
+def increment_learner_aip11_attempts(learner_id: str, competency_id: int, micro_credential_id: int) -> int:
+    """Increments aip11_attempts counter. Returns new count."""
+    now = utc_now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO learner_competency_progress
+            (learner_id, micro_credential_id, competency_id, competency_name, passed,
+             aip_count_used, aip11_attempts, attempts_count, status, enrolled_at, last_attempt_at, updated_at)
+            VALUES (?, ?, ?, '', 0, 0, 1, 0, 'in_progress', ?, ?, ?)
+            ON CONFLICT(learner_id, micro_credential_id, competency_id) DO UPDATE SET
+                aip11_attempts = aip11_attempts + 1,
+                last_attempt_at = excluded.last_attempt_at,
+                updated_at = excluded.updated_at
+            """,
+            (learner_id, micro_credential_id, competency_id, now, now, now),
+        )
+        row = conn.execute(
+            "SELECT aip11_attempts FROM learner_competency_progress WHERE learner_id = ? AND competency_id = ?",
+            (learner_id, competency_id),
+        ).fetchone()
+    return int(row["aip11_attempts"]) if row else 1
+
+
+def update_learner_cc_status(
+    learner_id: str,
+    competency_id: int,
+    micro_credential_id: int,
+    status: str,
+    competency_name: str = "",
+) -> None:
+    """Updates status: 'in_progress', 'competent', or 'not_yet_competent'."""
+    now = utc_now_iso()
+    competent_at = now if status == "competent" else None
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO learner_competency_progress
+            (learner_id, micro_credential_id, competency_id, competency_name, passed,
+             aip_count_used, aip11_attempts, attempts_count, status,
+             enrolled_at, last_attempt_at, competent_achieved_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?)
+            ON CONFLICT(learner_id, micro_credential_id, competency_id) DO UPDATE SET
+                status = excluded.status,
+                passed = CASE WHEN excluded.status = 'competent' THEN 1 ELSE passed END,
+                competent_achieved_at = COALESCE(competent_achieved_at, excluded.competent_achieved_at),
+                last_attempt_at = excluded.last_attempt_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                learner_id, micro_credential_id, competency_id,
+                competency_name, 1 if status == "competent" else 0,
+                status, now, now, competent_at, now,
+            ),
+        )
+
+
+# ── integrity_log ─────────────────────────────────────────────────────────────
+
+def log_integrity_event(
+    learner_id: str | None,
+    session_id: str | None,
+    micro_credential_id: int | None,
+    core_competency_id: int | None,
+    event_type: str,
+    event_detail: dict[str, Any],
+) -> int:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO integrity_log
+            (learner_id, micro_credential_id, core_competency_id, event_type,
+             event_detail, session_id, triggered_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                learner_id, micro_credential_id, core_competency_id,
+                event_type, _json_dumps(event_detail), session_id, utc_now_iso(),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def get_unreviewed_integrity_events(learner_id: str, core_competency_id: int) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, event_type, event_detail, session_id, triggered_at
+            FROM integrity_log
+            WHERE learner_id = ? AND core_competency_id = ? AND reviewed_by_admin = 0
+            ORDER BY id ASC
+            """,
+            (learner_id, core_competency_id),
+        ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "event_type": row["event_type"],
+            "event_detail": json.loads(row["event_detail"]),
+            "session_id": row["session_id"],
+            "triggered_at": row["triggered_at"],
+        }
+        for row in rows
+    ]
+
+
+def mark_integrity_event_reviewed(event_id: int, admin_action: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE integrity_log SET reviewed_by_admin = 1, admin_action_taken = ? WHERE id = ?",
+            (admin_action, event_id),
+        )
+
+
+# ── reference_responses (AI fingerprint library for similarity checks) ────────
+
+def store_reference_response(
+    core_competency_id: int,
+    competency_title: str,
+    response_text: str,
+    embedding: list[float] | None = None,
+) -> int:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO reference_responses
+            (core_competency_id, competency_title, response_text, embedding_json, generated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                core_competency_id, competency_title, response_text,
+                _json_dumps(embedding) if embedding else None,
+                utc_now_iso(),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+
+def get_reference_responses(core_competency_id: int) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, response_text, embedding_json FROM reference_responses WHERE core_competency_id = ?",
+            (core_competency_id,),
+        ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "response_text": row["response_text"],
+            "embedding": json.loads(row["embedding_json"]) if row["embedding_json"] else None,
+        }
+        for row in rows
+    ]

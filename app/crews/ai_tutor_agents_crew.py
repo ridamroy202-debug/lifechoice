@@ -14,7 +14,7 @@ class TutorCrew():
     def tutor(self) -> Agent:
         return Agent(
             config=self.agents_config['personal_ai_tutor_agent'],
-            llm=LLM(model=settings.anthropic_model, provider="anthropic", temperature=0.45, max_tokens=6144),
+            llm=LLM(model=settings.anthropic_model, provider="anthropic", temperature=0.45, max_tokens=settings.teaching_max_tokens),
             verbose=False,
             max_iter=3,
         )
@@ -35,3 +35,12 @@ class TutorCrew():
             process=Process.sequential,
             verbose=False,
         )
+
+# Module-level singleton — avoids re-instantiating Agent/Task/Crew on every call
+_tutor_crew_instance: Crew | None = None
+
+def get_tutor_crew() -> Crew:
+    global _tutor_crew_instance
+    if _tutor_crew_instance is None:
+        _tutor_crew_instance = TutorCrew().crew()
+    return _tutor_crew_instance

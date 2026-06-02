@@ -11,13 +11,25 @@ import yaml
 from app.crews.ai_tutor_agents_crew import TutorCrew
 from app.crews.assessment_crew import AssessmentCrew
 from app.crews.pre_assessment_crew import PreAssessCrew
+from app.gate_service import (
+    build_injected_context,
+    check_integrity_hold,
+    check_time_floor,
+    evaluate_mcq_answer,
+    get_next_fa_question,
+    inject_context_into_scenario,
+    log_integrity_event,
+    run_similarity_check,
+)
 from app.persistence import (
     append_event_log,
     create_badge,
     get_locked_rubric,
     get_rubric_source_hash,
     get_rubric_version,
+    increment_learner_aip11_attempts,
     normalize_rubric_key,
+    update_learner_cc_status,
     upsert_learner_competency_progress,
     record_competency_attempt,
     record_final_assessment,
@@ -97,6 +109,7 @@ COMPETENT_LABEL = "COMPETENT"
 NOT_YET_COMPETENT_LABEL = "NOT YET COMPETENT"
 LIVE_AI_AIP_CODES = frozenset(
     {
+        "AIP-01",
         "AIP-02",
         "AIP-03",
         "AIP-04",
@@ -108,6 +121,7 @@ LIVE_AI_AIP_CODES = frozenset(
         "AIP-10",
         "AIP-11",
         "AIP-12",
+        "AIP-13",
         "AIP-14",
     }
 )
@@ -1238,6 +1252,26 @@ def _build_formative_rubric(session: LearnerSession) -> dict[str, Any]:
 
 
 def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -> tuple[bool, float, str, bool]:
+    # Gate intercept: if current FA question came from question_bank or live_api MCQ, use zero-cost DB lookup
+    fa_q = session.current_fa_question
+    if fa_q and fa_q.get("question_bank_id"):
+        result = evaluate_mcq_answer(fa_q["question_bank_id"], learner_answer)
+        passed = result["passed"]
+        overall = 100.0 if passed else 0.0
+        correct = result["correct_answer"]
+        explanation = result.get("explanation", "")
+        if passed:
+            summary = f"Correct. The answer is **{correct}**. {explanation}".strip()
+        else:
+            summary = (
+                f"Not quite. The correct answer is **{correct}**. {explanation} "
+                "Review the concept and try the next question."
+            ).strip()
+        # Clear the FA question from session after evaluation
+        session.current_fa_question = None
+        session.question_displayed_at = None
+        return passed, overall, summary, passed  # last bool = easy_pass
+
     rubric = _build_formative_rubric(session)
     prompt = session.current_formative_prompt or session.current_subpart or session.current_competency
     feedback_aip = {
@@ -1295,6 +1329,8 @@ def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -
 
 
 def _should_ask_formative_check(session: LearnerSession) -> bool:
+    if session.pending_fa1_generation:
+        return True
     if session.learning_turn <= 0:
         return False
     if session.learning_turn % 2 == 0:
@@ -1358,6 +1394,33 @@ def _is_repeated_explanation(session: LearnerSession, ai_response: str) -> bool:
     if current == previous:
         return True
     return SequenceMatcher(a=current[:1200], b=previous[:1200]).ratio() >= 0.9
+
+
+def _response_has_complete_ending(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if re.search(r'[.!?]["\')\]]?\s*$', stripped):
+        return True
+    # Allow markdown table endings.
+    if stripped.endswith("|"):
+        return True
+    return False
+
+
+def _trim_to_last_complete_sentence(text: str) -> str:
+    stripped = (text or "").rstrip()
+    if not stripped:
+        return stripped
+    if _response_has_complete_ending(stripped):
+        return stripped
+    matches = list(re.finditer(r'[.!?]["\')\]]?(?=\s|$)', stripped))
+    if matches:
+        cutoff = matches[-1].end()
+        # Keep most of the content; avoid aggressive truncation.
+        if cutoff >= int(len(stripped) * 0.55):
+            return stripped[:cutoff].rstrip()
+    return f"{stripped}."
 
 
 def _generate_assessment_prompt(session: LearnerSession) -> str:
@@ -1444,21 +1507,26 @@ def _record_remote_teaching_interaction(
     if not remote_learning_session_id:
         return
 
-    try:
-        remote_backend_client.record_interaction(
-            session_id=remote_learning_session_id,
-            interaction_type=interaction_type,
-            ai_prompt=_sync_prompt_with_metadata(session, ai_prompt, interaction_type),
-            ai_response=ai_response,
-            learner_input=learner_input,
-            formative_passed=formative_passed,
-            token=session.remote_auth_token,
-        )
-    except RemoteBackendError as exc:
-        warning = f"Remote interaction sync failed for '{competency}': {exc}"
-        _set_remote_sync_failure(session, warning, remote_learning_session_id)
-        return
-    _set_remote_sync_success(session, remote_learning_session_id)
+    # Fire-and-forget in a thread — never blocks the learner response
+    import threading
+    def _sync():
+        try:
+            remote_backend_client.record_interaction(
+                session_id=remote_learning_session_id,
+                interaction_type=interaction_type,
+                ai_prompt=_sync_prompt_with_metadata(session, ai_prompt, interaction_type),
+                ai_response=ai_response,
+                learner_input=learner_input,
+                formative_passed=formative_passed,
+                token=session.remote_auth_token,
+            )
+        except RemoteBackendError as exc:
+            warning = f"Remote interaction sync failed for '{competency}': {exc}"
+            _set_remote_sync_failure(session, warning, remote_learning_session_id)
+            return
+        _set_remote_sync_success(session, remote_learning_session_id)
+
+    threading.Thread(target=_sync, daemon=True).start()
 
 
 def _generate_learning_response(session: LearnerSession, user_message: str, formative_feedback: str = "") -> tuple[str, str]:
@@ -1468,16 +1536,58 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
     current_subpart = session.current_subpart or competency
     personalization = _build_personalization_state(session)
     include_formative = _should_ask_formative_check(session)
+    if include_formative and not session.pending_fa1_generation:
+        target_slot = _target_formative_slot(session)
+        slot_failed = target_slot < len(session.formative_slots) and session.formative_slots[target_slot] is False
+        # Keep teaching and formative generation sequential for first-attempt FA1/FA2/FA3.
+        if not slot_failed:
+            include_formative = False
+            session.pending_fa1_generation = True
+    formative_only_mode = include_formative and session.pending_fa1_generation
     length_policy = _teaching_length_policy(session)
     previous_formats = ", ".join(session.delivery_format_history[-3:]) or "none yet"
+    # AIP-01 through AIP-04 are the 4 teaching turns (new mapping)
     live_aip_code = {
-        1: "AIP-03",
-        2: "AIP-04",
-        3: "AIP-05",
-        4: "AIP-07",
-        5: "AIP-09",
-        6: "AIP-11",
+        1: "AIP-01",
+        2: "AIP-02",
+        3: "AIP-03",
+        4: "AIP-04",
     }.get(session.learning_turn, "AIP-04")
+
+    # Pre-fetch MCQ only for retry slots to save cost after a failed formative.
+    # First-attempt formative checks remain scenario-based and AI-generated.
+    _prefetched_fa_question: dict | None = None
+    _prefetch_fa_phase: str | None = None
+    _prefetch_fa_slot: int | None = None
+    _prefetch_formative_aip: str | None = None
+    if include_formative:
+        _pf_target_slot = _target_formative_slot(session)
+        _pf_fa_slot = (_pf_target_slot + 1)  # 1-based
+        _pf_fa_phase = {1: "FA1", 2: "FA2", 3: "FA3"}.get(_pf_fa_slot, "FA1")
+        _pf_slot_failed = (
+            _pf_target_slot < len(session.formative_slots)
+            and session.formative_slots[_pf_target_slot] is False
+        )
+        if _pf_slot_failed:
+            try:
+                _prefetched_fa_question = get_next_fa_question(
+                    session_id=session.session_id,
+                    learner_id=session.learner_id,
+                    competency_title=session.current_competency,
+                    core_competency_id=session.current_remote_competency_id,
+                    micro_credential_id=session.remote_micro_credential_id,
+                    fa_phase=_pf_fa_phase,
+                    attempt_number=session.competency_attempt_number,
+                    auth_token=session.remote_auth_token,
+                    is_retry=True,
+                )
+                _prefetch_fa_phase = _pf_fa_phase
+                _prefetch_fa_slot = _pf_fa_slot
+                _prefetch_formative_aip = {1: "AIP-05", 2: "AIP-07", 3: "AIP-09"}.get(_pf_fa_slot)
+            except Exception as exc:
+                logger.warning("FA retry pre-fetch failed, AI will generate formative: %s", exc)
+    # If MCQ pre-fetched (retry path), tell AI NOT to generate its own formative section
+    ai_include_formative = include_formative and _prefetched_fa_question is None
 
     def _kickoff(delivery_mode: str, anti_repeat_instruction: str = "") -> str:
         result = _run_mapped_ai_call(
@@ -1511,7 +1621,7 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
                 "support_style": personalization["support_style"],
                 "feedback_style": personalization["feedback_style"],
                 "interaction_goal": _interaction_goal(session),
-                "include_formative_check": "yes" if include_formative else "no",
+                "include_formative_check": "yes" if ai_include_formative else "no",
                 "revision_required": "yes" if session.revision_required else "no",
                 "stage_instruction": _stage_teaching_instruction(session),
                 "response_word_floor": length_policy["floor"],
@@ -1524,40 +1634,90 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
         return result.raw.strip()
 
     ai_response = _kickoff(personalization["delivery_mode"])
-    missing_sections = _missing_tutor_sections(ai_response, include_formative)
-    if _is_repeated_explanation(session, ai_response) or _word_count(ai_response) < length_policy["floor"] or missing_sections:
-        alternate_mode = _alternate_delivery_mode(personalization["delivery_mode"])
-        personalization["delivery_mode"] = alternate_mode
-        session.personalization_state["delivery_mode"] = alternate_mode
-        ai_response = _kickoff(
-            alternate_mode,
-            anti_repeat_instruction=(
-                "Use a different explanatory approach, different structure, and different example from the previous assistant message. "
-                f"Expand the response to at least {length_policy['floor']} words and include these missing sections if absent: "
-                f"{', '.join(missing_sections) if missing_sections else 'all required sections'}."
-            ),
-        )
+    if formative_only_mode:
+        parsed_formative = _parse_formative_prompt(ai_response)
+        if not parsed_formative:
+            parsed_formative = (
+                f"Apply **{session.current_competency}** to the current scenario. "
+                "Explain exactly what you would do and why your approach is appropriate."
+            )
+        ai_response = f"## Formative Check\n\n{_trim_to_last_complete_sentence(parsed_formative)}"
+    else:
+        missing_sections = _missing_tutor_sections(ai_response, ai_include_formative)
+        if (
+            _is_repeated_explanation(session, ai_response)
+            or _word_count(ai_response) < length_policy["floor"]
+            or missing_sections
+            or not _response_has_complete_ending(ai_response)
+        ):
+            alternate_mode = _alternate_delivery_mode(personalization["delivery_mode"])
+            personalization["delivery_mode"] = alternate_mode
+            session.personalization_state["delivery_mode"] = alternate_mode
+            ai_response = _kickoff(
+                alternate_mode,
+                anti_repeat_instruction=(
+                    "Use a different explanatory approach, different structure, and different example from the previous assistant message. "
+                    f"Expand the response to at least {length_policy['floor']} words and include these missing sections if absent: "
+                    f"{', '.join(missing_sections) if missing_sections else 'all required sections'}. "
+                    "End with a complete, grammatically finished sentence."
+                ),
+            )
+        if not _response_has_complete_ending(ai_response):
+            ai_response = _trim_to_last_complete_sentence(ai_response)
     session.add_message("assistant", ai_response)
     interaction_type = "revision" if session.revision_required and session.learning_turn > BASE_LEARNING_INTERACTIONS else "teach"
 
+    if session.learning_turn == 2:
+        _record_aip(
+            session,
+            "AIP-04",
+            trigger="worked_example_delivered",
+            metadata={"delivery_mode": personalization["delivery_mode"]},
+        )
+
     if include_formative:
+        session.pending_fa1_generation = False
         session.awaiting_formative_response = True
-        target_slot = _target_formative_slot(session)
+        target_slot = _prefetch_fa_slot - 1 if _prefetch_fa_slot else _target_formative_slot(session)
         while len(session.formative_slots) <= target_slot:
             session.formative_slots.append(None)
         session.current_formative_slot = target_slot
-        session.current_formative_prompt = _parse_formative_prompt(ai_response)
-        formative_aip = {
-            1: "AIP-05",
-            2: "AIP-07",
-            3: "AIP-09",
-        }.get(session.formative_slot_number or 1)
+        fa_slot = _prefetch_fa_slot or (session.formative_slot_number or 1)
+        fa_phase = _prefetch_fa_phase or {1: "FA1", 2: "FA2", 3: "FA3"}.get(fa_slot, "FA1")
+        formative_aip = _prefetch_formative_aip or {1: "AIP-05", 2: "AIP-07", 3: "AIP-09"}.get(fa_slot)
+
+        if _prefetched_fa_question:
+            # Use pre-fetched MCQ — no second API call needed
+            fa_question = _prefetched_fa_question
+            session.current_fa_question = fa_question
+            mcq_prompt = (
+                f"\n\n## Formative Check ({fa_phase})\n\n"
+                f"{fa_question['question']}\n\n"
+                f"A) {fa_question['option_a']}\n"
+                f"B) {fa_question['option_b']}\n"
+                f"C) {fa_question['option_c']}\n"
+                f"D) {fa_question['option_d']}\n\n"
+                "Please reply with the letter of your answer (A, B, C, or D)."
+            )
+            ai_response = ai_response + mcq_prompt
+            session.messages[-1] = session.messages[-1].model_copy(update={"content": ai_response})
+            session.current_formative_prompt = fa_question["question"]
+            from datetime import datetime, timezone as _tz
+            session.question_displayed_at = datetime.now(_tz.utc).isoformat()
+        else:
+            # MCQ fetch failed — fall back to AI-generated formative already in ai_response
+            session.current_fa_question = None
+            session.current_formative_prompt = _parse_formative_prompt(ai_response)
+
         if formative_aip:
             _record_aip(
                 session,
                 formative_aip,
-                trigger=f"fa{session.formative_slot_number}_prompt_generated",
-                metadata={"delivery_mode": personalization["delivery_mode"]},
+                trigger=f"fa{fa_slot}_prompt_generated",
+                metadata={
+                    "delivery_mode": personalization["delivery_mode"],
+                    "source": session.current_fa_question.get("source") if session.current_fa_question else "ai_generated_scenario",
+                },
             )
         if interaction_type != "revision":
             interaction_type = "formative"
@@ -1582,6 +1742,7 @@ def _reset_learning_after_assessment_fail(session: LearnerSession):
     session.awaiting_formative_response = False
     session.current_formative_slot = -1
     session.current_formative_prompt = None
+    session.pending_fa1_generation = False
     session.revision_required = False
     session.revision_turns_used = 0
     session.consecutive_formative_passes = 0
@@ -1714,6 +1875,11 @@ def _learning_window_exhausted(session: LearnerSession) -> bool:
     return session.learning_turn >= limit
 
 
+def _is_mcq_answer(text: str) -> bool:
+    """True when the learner's message is a single MCQ letter (A/B/C/D), optionally with punctuation."""
+    return bool(re.fullmatch(r"\s*[A-Da-d][.):\s]*\s*", text.strip()))
+
+
 async def handle_learning(session: LearnerSession, user_message: str) -> dict[str, Any]:
     session.add_message("user", user_message)
     anomalies = detect_and_record_anomalies(session, user_message, "/learn/chat")
@@ -1756,10 +1922,54 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
             },
         )
 
+        # MCQ fast-path: return feedback immediately without firing a new teaching turn.
+        # The learner answered A/B/C/D — no AI generation needed for the feedback itself.
+        # The next teaching turn fires on the learner's NEXT message.
+        if _is_mcq_answer(user_message):
+            feedback_aip = {1: "AIP-06", 2: "AIP-08", 3: "AIP-10"}.get(
+                max(session.formative_slot_number or 1, 1), "AIP-06"
+            )
+            _record_aip(session, feedback_aip, trigger=f"fa_mcq_feedback",
+                        outcome="PASS" if formative_passed else "FAIL",
+                        metadata={"score": formative_percent})
+            session.add_message("assistant", formative_feedback)
+            _record_remote_teaching_interaction(
+                session, competency,
+                ai_prompt=session.current_formative_prompt or "",
+                ai_response=formative_feedback,
+                learner_input=user_message,
+                formative_passed=formative_passed,
+                interaction_type="formative_check",
+                allow_session_creation=False,
+            )
+            save_session(session)
+            return {
+                "session_id": session.session_id,
+                "phase": session.phase,
+                "competency": competency,
+                "interaction_number": session.competency_interaction,
+                "message": formative_feedback,
+                "mcq_result": {"passed": formative_passed, "score": formative_percent},
+                "awaiting_formative_response": False,
+                "ready_for_assessment": session.final_assessment_unlocked,
+                "gamification": build_gamification_payload(session),
+                "anomaly_flags": anomalies,
+                "backend_warnings": session.backend_warnings,
+                **_runtime_fields(session),
+            }
+
     if session.final_assessment_unlocked:
         session.phase = "competency_assessment"
         session.competency_interaction += 1
-        session.current_assessment_prompt = _generate_assessment_prompt(session)
+        # Build AIP-11 scenario with contextual injection (Phase 6.2)
+        base_prompt = _generate_assessment_prompt(session)
+        if not session.injected_context:
+            session.injected_context = build_injected_context(session.current_competency)
+        injected_prompt = inject_context_into_scenario(base_prompt, session.injected_context)
+        session.current_assessment_prompt = injected_prompt
+        # Record display timestamp for time-floor enforcement (Phase 6.3)
+        from datetime import datetime, timezone as _tz
+        session.aip11_question_displayed_at = datetime.now(_tz.utc).isoformat()
         session.add_message("assistant", session.current_assessment_prompt)
         _record_aip(session, "AIP-11", trigger="competency_assessment_prompt_generated")
         _record_session_interaction(
@@ -1822,13 +2032,6 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
         session.revision_turns_used = session.learning_turn - session.max_learning_turns
 
     ai_response, interaction_type = _generate_learning_response(session, user_message, formative_feedback)
-    if session.learning_turn == 2:
-        _record_aip(
-            session,
-            "AIP-04",
-            trigger="worked_example_delivered",
-            metadata={"delivery_mode": session.personalization_state.get("delivery_mode")},
-        )
     _record_remote_teaching_interaction(
         session,
         competency,
@@ -1876,6 +2079,44 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     session.add_message("user", user_answer)
     anomalies = detect_and_record_anomalies(session, user_answer, "/assessment/competency", is_assessment=True)
 
+    # Phase 6.3: Time-floor enforcement (90 seconds for AIP-11)
+    if not check_time_floor(session.aip11_question_displayed_at, floor_seconds=90):
+        log_integrity_event(
+            learner_id=session.learner_id,
+            session_id=session.session_id,
+            micro_credential_id=session.remote_micro_credential_id,
+            core_competency_id=session.current_remote_competency_id,
+            event_type="time_floor_breach",
+            event_detail={"floor_seconds": 90, "aip_phase": "AIP-11"},
+        )
+        save_session(session)
+        return {
+            "session_id": session.session_id,
+            "phase": session.phase,
+            "competency": competency,
+            "message": "Please take a moment to review your response before submitting.",
+            "time_floor_not_met": True,
+            **_runtime_fields(session),
+        }
+
+    # Track AIP-11 attempts (always live, never capped)
+    if session.learner_id and session.current_remote_competency_id:
+        increment_learner_aip11_attempts(
+            session.learner_id,
+            session.current_remote_competency_id,
+            session.remote_micro_credential_id or 0,
+        )
+
+    # Build evaluation prompt with injected context so evaluator checks scenario specificity
+    injected_ctx = session.injected_context or {}
+    eval_scenario = prompt
+    if injected_ctx:
+        eval_scenario = (
+            f"{prompt}\n\n[Injected context: company={injected_ctx.get('company_name','')}, "
+            f"location={injected_ctx.get('location','')}, "
+            f"detail={injected_ctx.get('situational_detail','')}]"
+        )
+
     result = _run_mapped_ai_call(
         session,
         "AIP-12",
@@ -1883,7 +2124,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
         crew_factory=AssessmentCrew,
         inputs={
             "competency": competency_label,
-            "scenario": prompt or scenario,
+            "scenario": eval_scenario,
             "user_response": user_answer,
             "rubric_json": json.dumps(rubric),
         },
@@ -1893,6 +2134,96 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     overall = float(normalized.get("overall_percent", 0.0) or 0.0)
     passed = bool(normalized.get("pass", overall >= PASS_THRESHOLD))
     summary = str(normalized.get("summary") or "").strip() or "No assessment summary returned."
+
+    # Phase 6.4: Integrity probe — fire-and-forget background task, does NOT block response
+    import asyncio as _asyncio
+
+    async def _run_integrity_probe():
+        try:
+            probe_result = _run_mapped_ai_call(
+                session,
+                "AIP-11",
+                purpose="integrity_probe",
+                crew_factory=AssessmentCrew,
+                inputs={
+                    "competency": competency_label,
+                    "scenario": (
+                        f"INTEGRITY PROBE: Extract one specific phrase or claim from the learner's answer below "
+                        f"and generate a targeted follow-up question referencing that exact phrase.\n\n"
+                        f"Original answer: {user_answer[:800]}\n\n"
+                        f"Return JSON: {{\"probe_question\": \"...\", \"target_phrase\": \"...\"}}"
+                    ),
+                    "user_response": user_answer,
+                    "rubric_json": json.dumps({"criteria": [], "pass_threshold": 0}),
+                },
+            )
+            probe_payload = _safe_json_loads(probe_result.raw, {})
+            probe_question = probe_payload.get("probe_question", "")
+            if probe_question:
+                from app.persistence import log_aip_usage as _log_aip
+                _log_aip(
+                    learner_id=session.learner_id,
+                    core_competency_id=session.current_remote_competency_id,
+                    micro_credential_id=session.remote_micro_credential_id,
+                    question_source="live_api",
+                    aip_phase="integrity_probe",
+                    aip_count_at_time=0,
+                    attempt_number=session.current_assessment_attempts,
+                    api_cost_estimate_usd=0.003,
+                    session_id=session.session_id,
+                    competency_name=competency,
+                )
+        except Exception as exc:
+            logger.warning("Integrity probe failed (background): %s", exc)
+
+    # Schedule probe as background task — does not delay learner response
+    try:
+        loop = _asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_run_integrity_probe())
+        else:
+            loop.run_until_complete(_run_integrity_probe())
+    except Exception:
+        pass  # Never block on probe failure
+
+    # Phase 6.6: Silent similarity check — true background task, never blocks response
+    try:
+        import asyncio as _asyncio2
+        loop2 = _asyncio2.get_event_loop()
+        if loop2.is_running():
+            loop2.run_in_executor(
+                None,
+                run_similarity_check,
+                session.learner_id,
+                session.session_id,
+                session.current_remote_competency_id,
+                session.remote_micro_credential_id,
+                user_answer,
+                None,
+            )
+    except Exception:
+        pass
+
+    # Phase 6.5: Integrity hold check — withhold verdict if 3+ unreviewed events
+    integrity_hold = check_integrity_hold(
+        learner_id=session.learner_id,
+        core_competency_id=session.current_remote_competency_id,
+        session_id=session.session_id,
+        micro_credential_id=session.remote_micro_credential_id,
+    )
+    if integrity_hold["hold"]:
+        save_session(session)
+        return {
+            "session_id": session.session_id,
+            "phase": session.phase,
+            "competency": competency,
+            "message": "Your submission is under review. You will be notified when a decision is made.",
+            "binary_outcome": None,
+            "integrity_hold": True,
+            "integrity_hold_reason": integrity_hold["reason"],
+            **_runtime_fields(session),
+        }
+
     provisional_binary_outcome = _binary_outcome_label(passed)
     session.local_assessment_passed = passed
     session.remote_assessment_synced = False
@@ -2009,6 +2340,10 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
                 passed=True,
                 latest_session_id=session.session_id,
                 latest_score=overall,
+            )
+            update_learner_cc_status(
+                session.learner_id, int(remote_competency_id), int(remote_micro_credential_id),
+                "competent", competency,
             )
         session.completed_competencies.append(
             CompetencyResult(
@@ -2144,6 +2479,10 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
             passed=False,
             latest_session_id=session.session_id,
             latest_score=overall,
+        )
+        update_learner_cc_status(
+            session.learner_id, int(remote_competency_id), int(remote_micro_credential_id),
+            "not_yet_competent", competency,
         )
     session.competency_attempts[competency] = session.competency_attempt_number + 1
     _reset_learning_after_assessment_fail(session)

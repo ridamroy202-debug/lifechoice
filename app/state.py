@@ -35,19 +35,19 @@ STREAK_BONUS_THRESHOLD = 3
 
 
 AIP_NAME_MAP: Dict[str, str] = {
-    "AIP-01": "Introduction",
-    "AIP-02": "Diagnostic Check",
-    "AIP-03": "Core Teaching",
-    "AIP-04": "Worked Example",
-    "AIP-05": "FA1 Generation",
+    "AIP-01": "Concept Delivery",
+    "AIP-02": "Worked Example",
+    "AIP-03": "Reflective Prompt",
+    "AIP-04": "Pre-Assessment Consolidation",
+    "AIP-05": "FA1 MCQ",
     "AIP-06": "FA1 Feedback",
-    "AIP-07": "FA2 Generation",
+    "AIP-07": "FA2 MCQ",
     "AIP-08": "FA2 Feedback",
-    "AIP-09": "FA3 Generation",
+    "AIP-09": "FA3 MCQ",
     "AIP-10": "FA3 Feedback",
-    "AIP-11": "Summative Assessment",
-    "AIP-12": "Summative Feedback",
-    "AIP-13": "Competency Summary",
+    "AIP-11": "Scenario Gate Assessment",
+    "AIP-12": "AIP-11 Feedback",
+    "AIP-13": "CC Competency Summary",
     "AIP-14": "MC Completion Reflection",
 }
 MAX_NAMED_AIPS_PER_COMPETENCY = 14
@@ -100,6 +100,7 @@ class LearnerSession(BaseModel):
     awaiting_formative_response: bool = False
     current_formative_slot: int = -1
     current_formative_prompt: Optional[str] = None
+    pending_fa1_generation: bool = False  # generic defer flag: next interaction should serve the pending formative prompt
     revision_required: bool = False
     revision_turns_used: int = 0
     formative_feedback_log: List[dict] = Field(default_factory=list)
@@ -143,6 +144,8 @@ class LearnerSession(BaseModel):
     )
     remote_last_event_at: Optional[str] = None
     session_summary: Dict[str, Any] = Field(default_factory=dict)
+    gamification_progress_cache: Optional[Dict[str, Any]] = None
+    gamification_progress_cached_at: Optional[str] = None
     current_aip_code: Optional[str] = None
     current_aip_name: Optional[str] = None
     competency_aip_history: List[Dict[str, Any]] = Field(default_factory=list)
@@ -157,6 +160,11 @@ class LearnerSession(BaseModel):
     remote_assessment_synced: bool = False
     remote_assessment_passed: Optional[bool] = None
     current_assessment_sync_error: Optional[str] = None
+    # Gate service fields — all optional with defaults so existing sessions deserialize safely
+    current_fa_question: Optional[Dict[str, Any]] = None  # active MCQ: {id, question, options, correct_answer, source, aip_phase, question_bank_id}
+    question_displayed_at: Optional[str] = None           # ISO timestamp when FA MCQ was shown (time-floor enforcement)
+    aip11_question_displayed_at: Optional[str] = None     # ISO timestamp when AIP-11 scenario was shown
+    injected_context: Optional[Dict[str, Any]] = None     # randomized scenario context for AIP-11 (Phase 6.2)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     completed_at: Optional[str] = None
@@ -303,7 +311,7 @@ class LearnerSession(BaseModel):
     def aip_budget_total(self) -> int:
         return MAX_NAMED_AIPS_PER_COMPETENCY
 
-    def format_recent_history(self, n: int = 10) -> str:
+    def format_recent_history(self, n: int = 8) -> str:
         if not self.messages:
             return 'No conversation yet.'
         lines = []
@@ -481,6 +489,7 @@ class LearnerSession(BaseModel):
         self.awaiting_formative_response = False
         self.current_formative_slot = -1
         self.current_formative_prompt = None
+        self.pending_fa1_generation = False
         self.revision_required = False
         self.revision_turns_used = 0
         self.formative_feedback_log = []
@@ -512,4 +521,10 @@ class LearnerSession(BaseModel):
         self.remote_assessment_synced = False
         self.remote_assessment_passed = None
         self.current_assessment_sync_error = None
+        self.current_fa_question = None
+        self.gamification_progress_cache = None
+        self.gamification_progress_cached_at = None
+        self.question_displayed_at = None
+        self.aip11_question_displayed_at = None
+        self.injected_context = None
         self.updated_at = datetime.now(timezone.utc).isoformat()

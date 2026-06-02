@@ -24,6 +24,83 @@ def init_db() -> None:
     with get_connection() as conn:
         conn.executescript(
             '''
+            CREATE TABLE IF NOT EXISTS question_bank (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                remote_question_id INTEGER,
+                core_competency_id INTEGER,
+                competency_title TEXT NOT NULL,
+                micro_credential TEXT,
+                question_text TEXT NOT NULL,
+                option_a TEXT NOT NULL,
+                option_b TEXT NOT NULL,
+                option_c TEXT NOT NULL,
+                option_d TEXT NOT NULL,
+                correct_answer TEXT NOT NULL,
+                explanation TEXT,
+                difficulty_level TEXT,
+                aip_phase TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                times_served INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS aip_usage_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                learner_id TEXT,
+                core_competency_id INTEGER,
+                micro_credential_id INTEGER,
+                question_source TEXT NOT NULL,
+                question_bank_id INTEGER,
+                aip_phase TEXT NOT NULL,
+                aip_count_at_time INTEGER NOT NULL DEFAULT 0,
+                attempt_number INTEGER NOT NULL DEFAULT 1,
+                triggered_at TEXT NOT NULL,
+                api_cost_estimate_usd REAL NOT NULL DEFAULT 0.00
+            );
+
+            CREATE TABLE IF NOT EXISTS platform_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS integrity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                learner_id TEXT,
+                micro_credential_id INTEGER,
+                core_competency_id INTEGER,
+                event_type TEXT NOT NULL,
+                event_detail TEXT NOT NULL DEFAULT '{}',
+                session_id TEXT,
+                triggered_at TEXT NOT NULL,
+                reviewed_by_admin INTEGER NOT NULL DEFAULT 0,
+                admin_action_taken TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS reference_responses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                core_competency_id INTEGER NOT NULL,
+                competency_title TEXT NOT NULL,
+                response_text TEXT NOT NULL,
+                embedding_json TEXT,
+                generated_at TEXT NOT NULL
+            );
+
+            CREATE TRIGGER IF NOT EXISTS trg_aip_count_exceeded
+            AFTER UPDATE OF aip_count_used ON learner_competency_progress
+            WHEN NEW.aip_count_used > 14
+            BEGIN
+                INSERT INTO aip_usage_log (
+                    learner_id, core_competency_id, micro_credential_id,
+                    question_source, aip_phase, aip_count_at_time,
+                    attempt_number, triggered_at, api_cost_estimate_usd
+                ) VALUES (
+                    NEW.learner_id, NEW.competency_id, NEW.micro_credential_id,
+                    'alert_aip_cap_exceeded', 'ALERT', NEW.aip_count_used,
+                    NEW.attempts_count, datetime('now'), 0.00
+                );
+            END;
+
             CREATE TABLE IF NOT EXISTS learners (
                 learner_id TEXT PRIMARY KEY,
                 profile_json TEXT NOT NULL DEFAULT '{}',
@@ -182,3 +259,30 @@ def init_db() -> None:
             );
             '''
         )
+
+        # Safe ALTER TABLE migrations — SQLite ignores duplicate column errors via try/except
+        _add_column_if_missing(conn, "learner_competency_progress", "aip_count_used", "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "learner_competency_progress", "aip11_attempts", "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "learner_competency_progress", "attempts_count", "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "learner_competency_progress", "status", "TEXT NOT NULL DEFAULT 'in_progress'")
+        _add_column_if_missing(conn, "learner_competency_progress", "enrolled_at", "TEXT")
+        _add_column_if_missing(conn, "learner_competency_progress", "last_attempt_at", "TEXT")
+        _add_column_if_missing(conn, "learner_competency_progress", "competent_achieved_at", "TEXT")
+        # aip_usage_log: add session_id + competency_name for session-level fallback counting
+        _add_column_if_missing(conn, "aip_usage_log", "session_id", "TEXT")
+        _add_column_if_missing(conn, "aip_usage_log", "competency_name", "TEXT")
+
+        # Seed platform_settings defaults
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT OR IGNORE INTO platform_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("aip_cap_per_cc", "14", now),
+        )
+
+
+def _add_column_if_missing(conn, table: str, column: str, definition: str) -> None:
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except Exception:
+        pass  # Column already exists

@@ -35,3 +35,12 @@ class PreAssessCrew():
             process=Process.sequential,
             verbose=False,
         )
+
+# Module-level singleton
+_pre_assess_crew_instance: Crew | None = None
+
+def get_pre_assess_crew() -> Crew:
+    global _pre_assess_crew_instance
+    if _pre_assess_crew_instance is None:
+        _pre_assess_crew_instance = PreAssessCrew().crew()
+    return _pre_assess_crew_instance

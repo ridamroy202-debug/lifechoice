@@ -19,6 +19,11 @@ _ENV_KEYS_TO_NORMALIZE = (
     "AI_ENGINE_DB_PATH",
     "REMOTE_BACKEND_URL",
     "REMOTE_API_TOKEN",
+    "REMOTE_API_TIMEOUT_SECONDS",
+    "REMOTE_GAMIFICATION_CACHE_SECONDS",
+    "TEACHING_MAX_TOKENS",
+    "MATERIALS_MAX_TOKENS",
+    "CHAT_HISTORY_TURNS",
     "RUBRIC_ADMIN_KEY",
     "CORS_ALLOWED_ORIGINS",
 )
@@ -61,6 +66,28 @@ def env_path(name: str, default: Path) -> Path:
     return Path(raw)
 
 
+def env_float(name: str, default: float) -> float:
+    load_environment()
+    raw = env_str(name, "")
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def env_int(name: str, default: int) -> int:
+    load_environment()
+    raw = env_str(name, "")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     openai_api_key: str
@@ -72,6 +99,11 @@ class Settings:
     ai_engine_db_path: Path
     remote_backend_url: str
     remote_api_token: str
+    remote_api_timeout_seconds: float
+    remote_gamification_cache_seconds: int
+    teaching_max_tokens: int
+    materials_max_tokens: int
+    chat_history_turns: int
     rubric_admin_key: str
     cors_allowed_origins: tuple[str, ...]
 
@@ -97,6 +129,11 @@ def get_settings() -> Settings:
         ai_engine_db_path=env_path("AI_ENGINE_DB_PATH", default_db),
         remote_backend_url=env_str("REMOTE_BACKEND_URL", "https://api.ikonskills.ac").rstrip("/"),
         remote_api_token=env_str("REMOTE_API_TOKEN"),
+        remote_api_timeout_seconds=max(5.0, env_float("REMOTE_API_TIMEOUT_SECONDS", 12.0)),
+        remote_gamification_cache_seconds=max(5, env_int("REMOTE_GAMIFICATION_CACHE_SECONDS", 30)),
+        teaching_max_tokens=max(512, env_int("TEACHING_MAX_TOKENS", 1800)),
+        materials_max_tokens=max(512, env_int("MATERIALS_MAX_TOKENS", 2200)),
+        chat_history_turns=max(4, env_int("CHAT_HISTORY_TURNS", 8)),
         rubric_admin_key=env_str("RUBRIC_ADMIN_KEY"),
         cors_allowed_origins=env_list(
             "CORS_ALLOWED_ORIGINS",
@@ -108,7 +145,7 @@ def get_settings() -> Settings:
                 "http://54.151.241.98",
                 "https://www.ikonskills.ac",
                 "https://ikonskills.ac",
-                'https://ikonskills.ac/'
+                "https://ikonskills.ac/",
             ),
         ),
     )
@@ -118,13 +155,14 @@ def configure_logging() -> None:
     global _LOGGING_CONFIGURED
     if _LOGGING_CONFIGURED:
         return
-    
+
     import sys
-    if sys.stdout and getattr(sys.stdout, 'encoding', '').lower() != 'utf-8':
+
+    if sys.stdout and getattr(sys.stdout, "encoding", "").lower() != "utf-8":
         try:
-            sys.stdout.reconfigure(encoding='utf-8')
+            sys.stdout.reconfigure(encoding="utf-8")
             if sys.stderr:
-                sys.stderr.reconfigure(encoding='utf-8')
+                sys.stderr.reconfigure(encoding="utf-8")
         except Exception:
             pass
 

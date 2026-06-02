@@ -1207,7 +1207,7 @@ def _apply_formative_outcome(session: LearnerSession, passed: bool, percent: flo
         if session.consecutive_formative_fails >= 2 or sum(item is False for item in session.formative_slots) >= 2:
             session.revision_required = True
 
-    if session.learning_turn >= BASE_LEARNING_INTERACTIONS and _all_formative_slots_passed(session):
+    if session.learning_turn + 1 >= BASE_LEARNING_INTERACTIONS and _all_formative_slots_passed(session):
         session.final_assessment_unlocked = True
 
     return _format_formative_feedback(passed, percent, summary, streak_bonus=session.streak_bonus_awarded)

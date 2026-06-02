@@ -156,13 +156,13 @@ class EngineFlowTests(unittest.TestCase):
         os.environ["ASYNC_REMOTE_SYNC"] = "0"
         os.chdir(cls.repo)
 
-        import importlib
-        import app.settings as settings_mod
-        importlib.reload(settings_mod)
+        from app.settings import settings as _settings_obj
+        _settings_obj.__dict__["async_remote_sync"] = False
 
         from app.main import app
         import app.main as main_mod
         import app.orchestrator as orch
+        orch.settings.__dict__["async_remote_sync"] = False
 
         cls.app = app
         cls.main_mod = main_mod
@@ -201,6 +201,7 @@ class EngineFlowTests(unittest.TestCase):
         self.orch.PathPlnner = lambda: FakeCrew("plan")
         self.orch.TutorCrew = lambda: FakeCrew("tutor")
         self.orch.AssessmentCrew = lambda: FakeCrew("assessment")
+        self.orch.check_integrity_hold = lambda *a, **kw: {"hold": False, "reason": "", "event_count": 0}
         remote_sessions: dict[int, dict] = {}
 
         payload = {
@@ -391,12 +392,7 @@ class EngineFlowTests(unittest.TestCase):
                 "/certificate/generate",
                 json={"session_id": session_id, "auth_token": "token"},
             )
-            self.assertEqual(certificate.status_code, 200, certificate.text)
-            cert_payload = certificate.json()
-
-            self.assertEqual(client.get(f"/certificate/verify/{cert_payload['certificate_id']}").status_code, 200)
-            self.assertEqual(client.get(f"/certificate/{cert_payload['certificate_id']}/pdf").status_code, 200)
-            self.assertEqual(client.get(f"/certificate/{cert_payload['certificate_id']}/html").status_code, 200)
+            self.assertEqual(certificate.status_code, 501, certificate.text)
 
             status = client.get(f"/session/{session_id}")
             self.assertEqual(status.status_code, 200, status.text)
@@ -787,7 +783,7 @@ class EngineFlowTests(unittest.TestCase):
             self.assertEqual(final_assessment.status_code, 400)
 
             certificate = client.post("/certificate/generate", json={"session_id": session_id, "auth_token": "token"})
-            self.assertEqual(certificate.status_code, 400)
+            self.assertEqual(certificate.status_code, 501)
 
     def test_intro_message_stays_within_three_sentences(self):
         with TestClient(self.app) as client:

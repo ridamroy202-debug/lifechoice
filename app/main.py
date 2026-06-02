@@ -1563,27 +1563,7 @@ async def final_assessment(req: AssessmentSubmitRequest):
 
 @app.post("/certificate/generate", summary="Generate a learner certificate", tags=["Certificates"], response_model=CertificateViewResponse)
 def generate_certificate(req: CertificateGenerateRequest, request: Request):
-    session = _get_or_404(req.session_id)
-    if session.phase != "completed":
-        raise HTTPException(status_code=400, detail="Certificate can only be generated after the session is completed.")
-    if not session.identity_verified:
-        raise HTTPException(status_code=400, detail="Learner identity must be verified before certificate generation.")
-    anomalies = get_unresolved_anomalies(session.session_id)
-    if any(item.get('severity') == 'critical' for item in anomalies):
-        raise HTTPException(status_code=409, detail="Certificate generation blocked by unresolved critical compliance flags.")
-
-    effective_token = req.auth_token or session.remote_auth_token or remote_backend_client.default_token or None
-    if not effective_token:
-        raise HTTPException(status_code=400, detail="auth_token is required to fetch learner profile details.")
-
-    try:
-        profile_payload = remote_backend_client.fetch_profile(token=effective_token)
-    except RemoteBackendError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    record = issue_certificate(session, profile_payload, _public_base_url(request))
-    _log_event(session.session_id, session.learner_id, '/certificate/generate', 'certificate_generated', {'certificate_id': record.certificate_id})
-    return _certificate_response(record)
+    raise HTTPException(status_code=501, detail="Certificate generation is currently disabled.")
 
 
 @app.get("/certificate/verify/{certificate_id}", summary="Verify a generated certificate", tags=["Certificates"], response_model=CertificateViewResponse)

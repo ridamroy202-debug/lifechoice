@@ -98,6 +98,43 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
+      - name: SSH connectivity diagnostics
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_PORT: ${{ secrets.EC2_PORT }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${EC2_HOST}" ] || [ -z "${EC2_SSH_KEY}" ]; then
+            echo "Missing EC2_HOST or EC2_SSH_KEY; skipping diagnostics" >&2
+            exit 1
+          fi
+
+          SSH_PORT="${EC2_PORT:-22}"
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "${EC2_SSH_KEY}" > ~/.ssh/lifechoice_ec2_key_diag
+          chmod 600 ~/.ssh/lifechoice_ec2_key_diag
+
+          echo "Running ssh-keyscan (verbose) against ${EC2_HOST}:${SSH_PORT}..."
+          ssh-keyscan -v -p "${SSH_PORT}" "${EC2_HOST}" || true
+
+          echo "Checking TCP reachability (nc)..."
+          if command -v nc >/dev/null; then
+            nc -z -v -w 5 "${EC2_HOST}" "${SSH_PORT}" || true
+          else
+            echo "nc not installed; attempting bash TCP check..."
+            timeout 5 bash -c "cat < /dev/tcp/${EC2_HOST}/${SSH_PORT}" 2>/dev/null || echo "tcp check failed"
+          fi
+
+          echo "Attempting short SSH connect (no remote commands)..."
+          ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i ~/.ssh/lifechoice_ec2_key_diag -p "${SSH_PORT}" "${EC2_USER}@${EC2_HOST}" exit || true
+
+          rm -f ~/.ssh/lifechoice_ec2_key_diag
+
       - name: Deploy latest image over SSH
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -119,7 +156,7 @@ jobs:
           echo "Connecting to ${EC2_USER}@${EC2_HOST}:${SSH_PORT}"
 
           mkdir -p ~/.ssh
-          printf '%s' "${EC2_SSH_KEY}" > ~/.ssh/lifechoice_ec2_key
+          printf '%s\n' "${EC2_SSH_KEY}" > ~/.ssh/lifechoice_ec2_key
           chmod 600 ~/.ssh/lifechoice_ec2_key
 
           echo "Scanning host keys..."

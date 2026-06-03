@@ -1,4 +1,5 @@
-﻿import json
+﻿import asyncio
+import json
 import os
 import unittest
 from pathlib import Path
@@ -1350,13 +1351,15 @@ class EvaluationNormalizationTests(unittest.TestCase):
         session.current_formative_prompt = 'For a startup with the mission to "develop renewable energy solutions," what key visual elements would you focus on, and how would they align with the mission statement?'
 
         with patch.object(orch, "AssessmentCrew", return_value=FailingAssessmentCrew()):
-            passed, overall, summary, easy_pass = orch._evaluate_formative_response(
-                session,
-                (
-                    "I would use a green and blue color palette, modern typography, sustainability-focused imagery, and simple iconography "
-                    "because those visual elements signal renewable energy, trust, and innovation. They align with the mission by making the brand "
-                    "feel environmentally responsible, future-focused, and easy for stakeholders to understand."
-                ),
+            passed, overall, summary, easy_pass = asyncio.run(
+                orch._evaluate_formative_response(
+                    session,
+                    (
+                        "I would use a green and blue color palette, modern typography, sustainability-focused imagery, and simple iconography "
+                        "because those visual elements signal renewable energy, trust, and innovation. They align with the mission by making the brand "
+                        "feel environmentally responsible, future-focused, and easy for stakeholders to understand."
+                    ),
+                )
             )
 
         self.assertTrue(passed)

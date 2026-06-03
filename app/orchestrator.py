@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 import json
@@ -323,7 +324,7 @@ def _binary_outcome_label(passed: bool) -> str:
     return COMPETENT_LABEL if passed else NOT_YET_COMPETENT_LABEL
 
 
-def _run_mapped_ai_call(
+async def _run_mapped_ai_call(
     session: LearnerSession,
     aip_code: str,
     *,
@@ -334,7 +335,8 @@ def _run_mapped_ai_call(
     if aip_code not in LIVE_AI_AIP_CODES:
         raise RuntimeError(f"Unmapped AI call attempted for {aip_code}.")
     session.record_live_aip_call(aip_code=aip_code, purpose=purpose, metadata={"input_keys": sorted(inputs.keys())})
-    return crew_factory().crew().kickoff(inputs=inputs)
+    crew = crew_factory().crew()
+    return await asyncio.to_thread(crew.kickoff, inputs=inputs)
 
 
 def _record_aip(
@@ -1039,10 +1041,10 @@ async def _setup_competency(session: LearnerSession):
         )
 
 
-def _generate_preassessment_prompt(session: LearnerSession) -> str:
+async def _generate_preassessment_prompt(session: LearnerSession) -> str:
     competency = session.current_competency
     competency_label = _competency_prompt_label(session, competency)
-    result = _run_mapped_ai_call(
+    result = await _run_mapped_ai_call(
         session,
         "AIP-02",
         purpose="diagnostic_prompt_generation",
@@ -1252,7 +1254,7 @@ def _build_formative_rubric(session: LearnerSession) -> dict[str, Any]:
     }
 
 
-def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -> tuple[bool, float, str, bool]:
+async def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -> tuple[bool, float, str, bool]:
     # Gate intercept: if current FA question came from question_bank or live_api MCQ, use zero-cost DB lookup
     fa_q = session.current_fa_question
     if fa_q and fa_q.get("question_bank_id"):
@@ -1280,7 +1282,7 @@ def _evaluate_formative_response(session: LearnerSession, learner_answer: str) -
         2: "AIP-08",
         3: "AIP-10",
     }.get(max(session.formative_slot_number or 1, 1), "AIP-06")
-    result = _run_mapped_ai_call(
+    result = await _run_mapped_ai_call(
         session,
         feedback_aip,
         purpose="formative_evaluation",
@@ -1535,7 +1537,7 @@ def _record_remote_teaching_interaction(
         _sync()
 
 
-def _generate_learning_response(session: LearnerSession, user_message: str, formative_feedback: str = "") -> tuple[str, str]:
+async def _generate_learning_response(session: LearnerSession, user_message: str, formative_feedback: str = "") -> tuple[str, str]:
     competency = session.current_competency
     competency_label = _competency_prompt_label(session, competency)
     competency_description = str(_get_competency_details(session, competency).get("description") or "").strip()
@@ -1595,8 +1597,8 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
     # If MCQ pre-fetched (retry path), tell AI NOT to generate its own formative section
     ai_include_formative = include_formative and _prefetched_fa_question is None
 
-    def _kickoff(delivery_mode: str, anti_repeat_instruction: str = "") -> str:
-        result = _run_mapped_ai_call(
+    async def _kickoff(delivery_mode: str, anti_repeat_instruction: str = "") -> str:
+        result = await _run_mapped_ai_call(
             session,
             live_aip_code,
             purpose="teaching_generation",
@@ -1639,7 +1641,7 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
         )
         return result.raw.strip()
 
-    ai_response = _kickoff(personalization["delivery_mode"])
+    ai_response = await _kickoff(personalization["delivery_mode"])
     if formative_only_mode:
         parsed_formative = _parse_formative_prompt(ai_response)
         if not parsed_formative:
@@ -1659,7 +1661,7 @@ def _generate_learning_response(session: LearnerSession, user_message: str, form
             alternate_mode = _alternate_delivery_mode(personalization["delivery_mode"])
             personalization["delivery_mode"] = alternate_mode
             session.personalization_state["delivery_mode"] = alternate_mode
-            ai_response = _kickoff(
+            ai_response = await _kickoff(
                 alternate_mode,
                 anti_repeat_instruction=(
                     "Use a different explanatory approach, different structure, and different example from the previous assistant message. "
@@ -1773,7 +1775,7 @@ async def handle_pre_assessment_start(session: LearnerSession) -> dict[str, Any]
             **_runtime_fields(session),
         }
 
-    prompt = _generate_preassessment_prompt(session)
+    prompt = await _generate_preassessment_prompt(session)
     session.pre_assessment_prompt = prompt
     session.pre_assessment_turn = 1
     session.competency_interaction = max(session.competency_interaction, 2)
@@ -1837,7 +1839,7 @@ async def handle_pre_assessment(session: LearnerSession, user_answer: str) -> di
 
     session.learning_turn = 1
     session.competency_interaction = 3
-    teaching_response, interaction_type = _generate_learning_response(
+    teaching_response, interaction_type = await _generate_learning_response(
         session,
         user_message=f"Learner pre-assessment answer: {user_answer}",
         formative_feedback="Use the pre-assessment answer to personalize the first teaching interaction.",
@@ -1894,7 +1896,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
     formative_passed: bool | None = None
 
     if session.awaiting_formative_response:
-        formative_passed, formative_percent, formative_summary, easy_pass = _evaluate_formative_response(session, user_message)
+        formative_passed, formative_percent, formative_summary, easy_pass = await _evaluate_formative_response(session, user_message)
         formative_feedback = _apply_formative_outcome(
             session,
             formative_passed,
@@ -2005,7 +2007,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
         session.learning_turn = 1
         session.competency_interaction = 3
         relearn_feedback = "Mastery gate not met. Restart from interaction 3 and reteach the weakest concepts with simpler explanations and a different format."
-        ai_response, interaction_type = _generate_learning_response(session, user_message, relearn_feedback)
+        ai_response, interaction_type = await _generate_learning_response(session, user_message, relearn_feedback)
         _record_remote_teaching_interaction(
             session,
             competency,
@@ -2037,7 +2039,7 @@ async def handle_learning(session: LearnerSession, user_message: str) -> dict[st
     if session.revision_required and session.learning_turn > session.max_learning_turns:
         session.revision_turns_used = session.learning_turn - session.max_learning_turns
 
-    ai_response, interaction_type = _generate_learning_response(session, user_message, formative_feedback)
+    ai_response, interaction_type = await _generate_learning_response(session, user_message, formative_feedback)
     _record_remote_teaching_interaction(
         session,
         competency,
@@ -2124,7 +2126,7 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
             f"detail={injected_ctx.get('situational_detail','')}]"
         )
 
-    result = _run_mapped_ai_call(
+    result = await _run_mapped_ai_call(
         session,
         "AIP-12",
         purpose="competency_assessment_scoring",
@@ -2143,11 +2145,10 @@ async def handle_competency_assessment(session: LearnerSession, user_answer: str
     summary = str(normalized.get("summary") or "").strip() or "No assessment summary returned."
 
     # Phase 6.4: Integrity probe — fire-and-forget background task, does NOT block response
-    import asyncio as _asyncio
 
     async def _run_integrity_probe():
         try:
-            probe_result = _run_mapped_ai_call(
+            probe_result = await _run_mapped_ai_call(
                 session,
                 "AIP-11",
                 purpose="integrity_probe",
@@ -2562,7 +2563,7 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
     session.add_message("user", user_answer)
     anomalies = detect_and_record_anomalies(session, user_answer, "/assessment/final", is_assessment=True)
 
-    result = _run_mapped_ai_call(
+    result = await _run_mapped_ai_call(
         session,
         "AIP-14" if session.is_last_competency else "AIP-12",
         purpose="final_assessment_scoring",

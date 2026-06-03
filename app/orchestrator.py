@@ -2685,3 +2685,6 @@ async def handle_final_assessment(session: LearnerSession, user_answer: str) -> 
         "backend_warnings": session.backend_warnings,
         **_runtime_fields(session),
     }
+
+
+# Updated with async 

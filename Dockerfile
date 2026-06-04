@@ -14,6 +14,7 @@ RUN python -m pip install --upgrade pip && \
     python -m pip install -r requirements.txt
 
 COPY app ./app
+COPY generate_banks.py ./generate_banks.py
 
 RUN mkdir -p /app/data /app/generated_certificates && \
     chown -R appuser:appuser /app

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 import logging
 import re
 import time
+import threading
+import uuid
 from app.session_manager import create_session, get_session, save_session
 from fastapi.responses import HTMLResponse, Response
 from app.certificates import (
@@ -1872,3 +1874,178 @@ def admin_cc_question_bank_status(competency_id: int):
         "fa2_count": fa2,
         "fa3_count": fa3,
     }
+
+
+# ── Question Bank Batch Generation ────────────────────────────────────────────
+
+_qbank_jobs: dict[str, dict[str, Any]] = {}
+_qbank_jobs_lock = threading.Lock()
+
+
+class QbankGenerateRequest(BaseModel):
+    mc_name: Optional[str] = Field(None, description="Generate for one specific MC name")
+    category: Optional[str] = Field(None, description="Generate for one domain/category")
+    dry_run: bool = Field(False, description="Test run without API calls")
+    auth_token: Optional[str] = None
+
+
+def _run_qbank_generation(job_id: str, mc_name: str | None, category: str | None, dry_run: bool):
+    """Background worker that runs generate_banks logic."""
+    try:
+        import csv as _csv
+        from pathlib import Path as _Path
+        from generate_banks import (
+            load_catalog, generate_single_mc, _csv_path,
+            ASSESSMENTS, BATCHES_PER_FA, QUESTIONS_PER_FA, PIPELINE_VERSION,
+            CSV_COLUMNS,
+        )
+
+        MCQ_RESPONSE_FIELDS = [
+            "cc_title", "assessment_type", "question_number",
+            "question", "option_a", "option_b", "option_c", "option_d",
+            "correct_answer", "explanation", "difficulty",
+        ]
+
+        def _read_mcq_rows_from_csv(csv_path: str) -> list[dict]:
+            """Read generated CSV and return MCQ rows with the requested fields."""
+            path = _Path(csv_path)
+            if not path.exists():
+                return []
+            rows = []
+            with open(path, encoding="utf-8", newline="") as f:
+                for r in _csv.DictReader(f):
+                    row = {field: r.get(field, "") for field in MCQ_RESPONSE_FIELDS}
+                    rows.append(row)
+            return rows
+
+        with _qbank_jobs_lock:
+            _qbank_jobs[job_id]["status"] = "running"
+
+        catalog = load_catalog()
+        if mc_name:
+            catalog = [c for c in catalog if c["mc_name"].lower() == mc_name.lower()]
+        elif category:
+            catalog = [c for c in catalog if category.lower() in c["domain_name"].lower()]
+
+        if not catalog:
+            with _qbank_jobs_lock:
+                _qbank_jobs[job_id]["status"] = "failed"
+                _qbank_jobs[job_id]["error"] = "No MCs matched the filter."
+            return
+
+        total = len(catalog)
+        mcqs_per_mc = 10 * len(ASSESSMENTS) * QUESTIONS_PER_FA
+        results = []
+
+        for i, mc in enumerate(catalog, 1):
+            with _qbank_jobs_lock:
+                _qbank_jobs[job_id]["progress"] = {
+                    "current_mc": i,
+                    "total_mcs": total,
+                    "mc_name": mc["mc_name"],
+                }
+
+            result = generate_single_mc(mc, dry_run=dry_run, verbose=False)
+
+            # Read the CSV to include actual MCQ rows in the result
+            questions = _read_mcq_rows_from_csv(result.get("csv_path", ""))
+            result["questions"] = questions
+
+            results.append(result)
+
+        completed = sum(1 for r in results if r["status"] == "COMPLETE")
+        failed = sum(1 for r in results if r["status"] == "FAILED")
+        partial = sum(1 for r in results if r["status"] == "PARTIAL")
+
+        with _qbank_jobs_lock:
+            _qbank_jobs[job_id]["status"] = "completed"
+            _qbank_jobs[job_id]["progress"] = None
+            _qbank_jobs[job_id]["result"] = {
+                "total_mcs": total,
+                "completed": completed,
+                "partial": partial,
+                "failed": failed,
+                "details": results,
+            }
+            _qbank_jobs[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+    except Exception as exc:
+        logger.exception("Qbank generation job %s failed", job_id)
+        with _qbank_jobs_lock:
+            _qbank_jobs[job_id]["status"] = "failed"
+            _qbank_jobs[job_id]["error"] = str(exc)
+
+
+@app.post(
+    "/admin/qbank/generate-batch",
+    summary="Start a batch MCQ question bank generation job",
+    tags=["Admin"],
+)
+def admin_qbank_generate_batch(req: QbankGenerateRequest):
+    """
+    Starts a background job to generate MCQ question banks using Claude.
+
+    - No filter: generates for all 184 MCs (~$375, ~6 hours)
+    - --mc "AI Prompt Engineer": single MC (~$2, ~3 min)
+    - --category "AI": one domain (~$varies)
+    - --dry-run: test without API calls
+
+    Poll GET /admin/qbank/jobs/{job_id} for progress.
+    """
+    if not req.mc_name and not req.category and not req.dry_run:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide mc_name, category, or set dry_run=true. "
+                   "Generating all 184 MCs without a filter costs ~$375.",
+        )
+
+    job_id = uuid.uuid4().hex[:12]
+    with _qbank_jobs_lock:
+        _qbank_jobs[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "mc_name": req.mc_name,
+            "category": req.category,
+            "dry_run": req.dry_run,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": None,
+            "progress": None,
+            "result": None,
+            "error": None,
+        }
+
+    thread = threading.Thread(
+        target=_run_qbank_generation,
+        args=(job_id, req.mc_name, req.category, req.dry_run),
+        daemon=True,
+    )
+    thread.start()
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "message": f"Generation job started. Poll GET /admin/qbank/jobs/{job_id} for status.",
+    }
+
+
+@app.get(
+    "/admin/qbank/jobs",
+    summary="List all question bank generation jobs",
+    tags=["Admin"],
+)
+def admin_qbank_list_jobs():
+    with _qbank_jobs_lock:
+        return {"jobs": list(_qbank_jobs.values())}
+
+
+@app.get(
+    "/admin/qbank/jobs/{job_id}",
+    summary="Get status of a question bank generation job",
+    tags=["Admin"],
+)
+def admin_qbank_get_job(job_id: str):
+    with _qbank_jobs_lock:
+        job = _qbank_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found.")
+    return job

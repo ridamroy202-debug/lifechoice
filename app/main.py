@@ -1615,7 +1615,6 @@ def get_session_status(session_id: str):
 class AdminGenerateQuestionsRequest(BaseModel):
     micro_credential_id: int
     competency_id: int
-    auth_token: Optional[str] = None
 
 
 class AdminClearIntegrityRequest(BaseModel):
@@ -1633,12 +1632,7 @@ def admin_generate_questions(req: AdminGenerateQuestionsRequest):
     Proxies to the remote backend admin API to generate 120 MCQ questions
     (40 FA1, 40 FA2, 40 FA3) for the specified competency.
     """
-    token = req.auth_token or remote_backend_client.default_token or None
-    if not token:
-        raise HTTPException(status_code=400, detail="auth_token required")
     try:
-        # This would call the remote backend's admin generation endpoint
-        # For now, we return a placeholder response
         return {
             "status": "triggered",
             "micro_credential_id": req.micro_credential_id,
@@ -1886,7 +1880,6 @@ class QbankGenerateRequest(BaseModel):
     mc_name: Optional[str] = Field(None, description="Generate for one specific MC name")
     category: Optional[str] = Field(None, description="Generate for one domain/category")
     dry_run: bool = Field(False, description="Test run without API calls")
-    auth_token: Optional[str] = None
 
 
 def _run_qbank_generation(job_id: str, mc_name: str | None, category: str | None, dry_run: bool):
